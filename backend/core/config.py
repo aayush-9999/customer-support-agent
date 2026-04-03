@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # ── Groq ───────────────────────────────────────────────────────────────
     groq_api_key: str = Field(..., description="Groq API key — required")
-    groq_model: str = Field(default="llama-3.3-70b-versatile")
+    groq_model: str = Field(default="llama-3.1-8b-instant")
     groq_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     groq_max_tokens: int = Field(default=1024, gt=0)
     groq_timeout_seconds: int = Field(default=30, gt=0)

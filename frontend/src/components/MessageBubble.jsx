@@ -1,23 +1,65 @@
 // frontend/src/components/MessageBubble.jsx
 
+function formatTime(ts) {
+  if (!ts) return "";
+  try {
+    return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } catch { return ""; }
+}
+
 export function MessageBubble({ message }) {
   const isUser = message.role === "user";
 
+  // ── Admin notification pill ───────────────────────────────────────────────
+  if (message.isNotification) {
+    const isApproved = message.status === "approved";
+    return (
+      <div className="notification-banner">
+        <div className={`notification-banner__inner ${isApproved ? "notification-banner--approved" : "notification-banner--rejected"}`}>
+          <span className="notification-banner__icon">
+            {isApproved ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            )}
+          </span>
+          <span className="notification-banner__text">{message.content}</span>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Regular message bubble ────────────────────────────────────────────────
   return (
     <div className={`msg-row ${isUser ? "msg-row--user" : "msg-row--bot"}`}>
       {!isUser && (
-        <div className="avatar">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"
-              fill="currentColor" opacity="0.7"/>
+        <div className="msg-avatar">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M12 2a5 5 0 1 0 0 10A5 5 0 0 0 12 2zM2 20c0-4 4.5-7 10-7s10 3 10 7"/>
           </svg>
         </div>
       )}
-      <div className={`bubble ${isUser ? "bubble--user" : "bubble--bot"} ${message.isError ? "bubble--error" : ""}`}>
-        <p className="bubble__text">{message.content}</p>
-        {message.wasEscalated && (
-          <span className="escalation-badge">Escalated to team</span>
-        )}
+
+      <div className="msg-content">
+        <div className={`bubble ${isUser ? "bubble--user" : "bubble--bot"} ${message.isError ? "bubble--error" : ""}`}>
+          <p className="bubble__text">{message.content}</p>
+        </div>
+
+        <div className={`msg-meta ${isUser ? "msg-meta--right" : ""}`}>
+          {message.wasEscalated && (
+            <span className="escalation-tag">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+              </svg>
+              Escalated to team
+            </span>
+          )}
+          <span className="msg-time">{formatTime(message.timestamp)}</span>
+        </div>
       </div>
     </div>
   );

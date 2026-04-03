@@ -4,6 +4,7 @@ import logging
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from pymongo import DESCENDING
 
 from backend.agent.loop import run_agent
 from backend.agent.schemas import ChatRequest, ChatResponse
@@ -12,6 +13,10 @@ from backend.policies.file_store import FilePolicyStore
 from backend.services.llm_base import LLMBase
 from backend.services.conversation_store import ConversationStore
 from backend.api.dependencies import get_conversations
+from backend.agent.schemas import Message, Role
+from backend.database import get_db                          # ← add this
+from motor.motor_asyncio import AsyncIOMotorDatabase         # ← add this too
+from bson import ObjectId
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -31,6 +36,7 @@ async def chat(
     llm:           LLMBase           = Depends(get_groq),
     policy:        FilePolicyStore   = Depends(get_policy),
     conversations: ConversationStore = Depends(get_conversations),
+    db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     try:
         # Ensure conversation document exists for this session
@@ -46,11 +52,36 @@ async def chat(
             order_id   = body.order_id,
         )
 
+        conv = await conversations.get_or_create(
+            session_id = body.session_id,
+            user_id    = str(current_user["_id"]),
+        )
+
+        # Convert stored dicts to Message objects the agent understands
+        history: list[Message] = [
+            Message(role=Role(m["role"]), content=m["content"])
+            for m in conv.get("messages", [])
+            if m["role"] in ("user", "assistant")  # skip any sentinel rows
+        ]
+
         response = await run_agent(
             request      = request,
             llm          = llm,
             policy_store = policy,
+            history      = history,
         )
+
+        if any(tc.tool_name == "change_delivery_date" for tc in response.tool_calls):
+            await db.pending_requests.find_one_and_update(
+                {
+                    "user_id": ObjectId(str(current_user["_id"])),
+                    "status": "pending",
+                    "session_id": None,
+                },
+                {"$set": {"session_id": body.session_id}},
+                sort=[("created_at", DESCENDING)],
+            )
+
 
         # Save turn to conversation history
         await conversations.append_turn(

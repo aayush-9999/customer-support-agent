@@ -11,6 +11,9 @@ from backend.api.dependencies import get_current_admin
 from backend.database import get_db
 from backend.api.websocket import ws_manager
 
+from backend.services.conversation_store import ConversationStore
+from backend.api.dependencies import get_conversations
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -103,6 +106,7 @@ async def approve_request(
     body:         ResolutionBody = ResolutionBody(),
     current_user: dict = Depends(get_current_admin),
     db:           AsyncIOMotorDatabase = Depends(get_db),
+    conversations: ConversationStore = Depends(get_conversations),
 ):
     """Approve a pending request — updates DB and mirrors status to order."""
     try:
@@ -151,17 +155,29 @@ async def approve_request(
         f"Request {request_id} approved by {current_user.get('email')}"
     )
 
-    # Notify customer if online
+    approval_message = (
+        f"Great news! Your delivery date change request has been approved. "
+        f"Your new delivery date is "
+        f"{req['requested_value'].strftime('%B %d, %Y')}."
+    )
+
+    # ── Bug 3 fix: persist to conversation history ──────────────────────────
+    session_id = str(req.get("session_id", ""))
+    if session_id:
+        await conversations.append_turn(
+            session_id   = session_id,
+            user_message = "[Admin notification]",   # sentinel — not shown to user
+            bot_reply    = approval_message,
+            tool_calls   = [],
+        )
+
+    # Notify if online (existing code)
     await ws_manager.notify_session(
-        session_id = str(req.get("session_id", "")),
+        session_id = session_id,
         payload    = {
             "type":    "request_resolved",
             "status":  "approved",
-            "message": (
-                f"Great news! Your delivery date change request has been approved. "
-                f"Your new delivery date is "
-                f"{req['requested_value'].strftime('%B %d, %Y')}."
-            ),
+            "message": approval_message,
         }
     )
 
@@ -178,8 +194,8 @@ async def reject_request(
     body:         ResolutionBody = ResolutionBody(),
     current_user: dict = Depends(get_current_admin),
     db:           AsyncIOMotorDatabase = Depends(get_db),
+    conversations: ConversationStore = Depends(get_conversations),  # ← add
 ):
-    """Reject a pending request — updates DB and mirrors status to order."""
     try:
         rid = ObjectId(request_id)
     except Exception:
@@ -206,12 +222,11 @@ async def reject_request(
         }}
     )
 
-    # Mirror to order
     await db.orders.update_one(
         {"_id": req["order_id"]},
         {"$set": {
-            "delivery_date_change_request.status":      "rejected",
-            "delivery_date_change_request.resolved_at": now,
+            "delivery_date_change_request.status":          "rejected",
+            "delivery_date_change_request.resolved_at":    now,
             "delivery_date_change_request.resolution_note": body.note,
         }}
     )
@@ -220,16 +235,28 @@ async def reject_request(
         f"Request {request_id} rejected by {current_user.get('email')}"
     )
 
+    rejection_message = (
+        "Unfortunately your delivery date change request could not be approved. "
+        f"Reason: {body.note or 'No reason provided'}."
+    )
+
+    # ── Bug 3 fix: persist to conversation history ──────────────────────────
+    session_id = str(req.get("session_id", ""))
+    if session_id:
+        await conversations.append_turn(
+            session_id   = session_id,
+            user_message = "[Admin notification]",
+            bot_reply    = rejection_message,
+            tool_calls   = [],
+        )
+
     await ws_manager.notify_session(
-    session_id = str(req.get("session_id", "")),
-    payload    = {
-        "type":    "request_resolved",
-        "status":  "rejected",
-        "message": (
-            "Unfortunately your delivery date change request could not be approved. "
-            f"Reason: {body.note or 'No reason provided'}."
-        ),
-    }
+        session_id = session_id,
+        payload    = {
+            "type":    "request_resolved",
+            "status":  "rejected",
+            "message": rejection_message,
+        }
     )
 
     return {
@@ -237,7 +264,6 @@ async def reject_request(
         "request_id": request_id,
         "note":       body.note,
     }
-
 
 @router.get("/requests/stats")
 async def get_stats(
