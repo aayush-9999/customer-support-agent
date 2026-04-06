@@ -1,0 +1,138 @@
+/* ── Reset ───────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Design tokens ──────────────────────────────────────────────────────── */
+:root {
+  /* Sidebar (dark) */
+  --sidebar-bg:       #0f1117;
+  --sidebar-border:   #1e2130;
+  --sidebar-icon:     #4a5068;
+  --sidebar-icon-active: #e8e8f0;
+  --sidebar-dot:      #3b82f6;
+
+  /* Content area (light) */
+  --bg:               #f5f5f7;
+  --surface:          #ffffff;
+  --surface-alt:      #f0f0f4;
+  --border:           #e2e2e8;
+  --border-strong:    #c8c8d0;
+
+  /* Text */
+  --text-primary:     #111118;
+  --text-secondary:   #5a5a72;
+  --text-muted:       #9090a8;
+  --text-on-dark:     #e8e8f0;
+
+  /* Status colours */
+  --amber:            #f59e0b;
+  --amber-bg:         #fef3c7;
+  --amber-text:       #92400e;
+  --green:            #10b981;
+  --green-bg:         #d1fae5;
+  --green-text:       #065f46;
+  --red:              #ef4444;
+  --red-bg:           #fee2e2;
+  --red-text:         #991b1b;
+  --blue:             #3b82f6;
+  --blue-bg:          #dbeafe;
+  --blue-text:        #1e40af;
+
+  /* Tier colours */
+  --tier-bronze:      #cd7f32;
+  --tier-silver:      #9ca3af;
+  --tier-gold:        #f59e0b;
+  --tier-platinum:    #8b5cf6;
+
+  /* Typography */
+  --font-ui:          'Syne', sans-serif;
+  --font-mono:        'IBM Plex Mono', monospace;
+
+  /* Spacing */
+  --sidebar-w:        56px;
+  --drawer-w:         420px;
+  --header-h:         52px;
+  --row-h:            48px;
+
+  /* Easing */
+  --ease-out:         cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-ui);
+  background: var(--bg);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── Mono numbers ────────────────────────────────────────────────────────── */
+.mono { font-family: var(--font-mono); }
+
+/* ── Status badge ────────────────────────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  font-family: var(--font-ui);
+}
+.badge-pending  { background: var(--amber-bg);  color: var(--amber-text); }
+.badge-approved { background: var(--green-bg);  color: var(--green-text); }
+.badge-rejected { background: var(--red-bg);    color: var(--red-text); }
+.badge-bronze   { background: #fde8cc; color: var(--tier-bronze); }
+.badge-silver   { background: #f3f4f6; color: #4b5563; }
+.badge-gold     { background: var(--amber-bg); color: #92400e; }
+.badge-platinum { background: #ede9fe; color: var(--tier-platinum); }
+
+/* ── Button base ─────────────────────────────────────────────────────────── */
+button {
+  font-family: var(--font-ui);
+  cursor: pointer;
+  border: none;
+  outline: none;
+  transition: all 0.15s ease;
+}
+button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* ── Animations ──────────────────────────────────────────────────────────── */
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+@keyframes fadeOut {
+  from { opacity: 1; transform: scale(1);    max-height: var(--row-h); }
+  to   { opacity: 0; transform: scale(0.97); max-height: 0; padding: 0; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
