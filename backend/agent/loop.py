@@ -49,11 +49,14 @@ When a customer wants to change the delivery date:
   - You must have a confirmed order_id before calling change_delivery_date.
   - If you already asked for the order and the customer confirmed it, you have the
     order_id from the get_order_history result in this conversation — use it.
-  - You also need a specific date. "sooner" is not a date. Ask for one.
-  - Once you have both: call change_delivery_date(order_id, requested_date).
-  - Report the outcome (approved / pending / rejected / already_pending) clearly.
-  - If pending: "Your request has been sent to our team. You'll hear back within
-    24 hours — we'll notify you here as soon as it's reviewed."
+  - If the customer says "sooner", "earlier", "as soon as possible", or gives no
+    specific date: call get_order_details(order_id) to get estimated_warehouse_date.
+    Then calculate earliest_possible = estimated_warehouse_date + 1 day.
+    Tell the customer: "The earliest we can deliver is [date]. Shall I request that?"
+    Wait for confirmation, then call change_delivery_date with that date.
+  - Never ask the customer to supply a date they cannot know. Always compute it.
+  - Once you have a confirmed date (from the customer or computed above):
+    call change_delivery_date(order_id, requested_date).
 
 ══ TOOL DISCIPLINE ══
 - Only report what a tool actually returned.
@@ -73,6 +76,7 @@ async def run_agent(
     request:      ChatRequest,
     llm:          LLMBase,
     policy_store: FilePolicyStore,
+    tools:        list[BaseTool],    # ← ADD this parameter
     history:      list[Message] | None = None,
 ) -> AgentResponse:
 
@@ -113,7 +117,7 @@ async def run_agent(
 
     response = await llm.chat(
         messages      = messages,
-        tools         = [],
+        tools         = tools,       # ← pass them through
         system_prompt = system_prompt,
     )
 

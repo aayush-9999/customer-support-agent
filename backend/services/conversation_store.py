@@ -34,11 +34,12 @@ class ConversationStore:
         user_message: str,
         bot_reply:    str,
         tool_calls:   list = [],
+        tool_results: list = [],   # ← ADD
     ) -> None:
         if settings.db_tool_mode == "postgres":
             return await self._pg_append_turn(session_id, user_message, bot_reply, tool_calls)
-        return await self._mongo_append_turn(session_id, user_message, bot_reply, tool_calls)
-
+        return await self._mongo_append_turn(session_id, user_message, bot_reply, tool_calls, tool_results)
+    
     async def close_session(self, session_id: str) -> None:
         if settings.db_tool_mode == "postgres":
             return await self._pg_close_session(session_id)
@@ -69,13 +70,48 @@ class ConversationStore:
         doc["_id"] = result.inserted_id
         return doc
 
-    async def _mongo_append_turn(self, session_id, user_message, bot_reply, tool_calls):
+    async def _mongo_append_turn(self, session_id, user_message, bot_reply, tool_calls, tool_results=None):
+        import json
         now = datetime.now(timezone.utc)
-        messages_to_add = [
-            {"role": "user",      "content": user_message, "timestamp": now},
-            {"role": "assistant", "content": bot_reply,    "timestamp": now,
-             "tool_calls": [t.tool_name for t in tool_calls]},
-        ]
+        messages_to_add = []
+
+        # 1. User message
+        messages_to_add.append({
+            "role":      "user",
+            "content":   user_message,
+            "timestamp": now,
+        })
+
+        # 2. If tools were called, save the encoded tool_calls assistant row
+        #    so _build_messages() can reconstruct it on the next turn
+        if tool_calls:
+            encoded_payload = json.dumps([
+                {"id": tc.id, "name": tc.tool_name, "arguments": tc.arguments}
+                for tc in tool_calls
+            ])
+            messages_to_add.append({
+                "role":      "assistant",
+                "content":   f"__tool_calls__:{encoded_payload}",
+                "timestamp": now,
+            })
+
+        # 3. Save each tool result row (so the model sees what tools returned)
+        if tool_results:
+            for tr in tool_results:
+                messages_to_add.append({
+                    "role":         "tool",
+                    "content":      tr.content,
+                    "tool_call_id": tr.tool_call_id,
+                    "timestamp":    now,
+                })
+
+        # 4. Final assistant reply (the clean text shown to user)
+        messages_to_add.append({
+            "role":      "assistant",
+            "content":   bot_reply,
+            "timestamp": now,
+        })
+
         await self._db.conversations.update_one(
             {"session_id": session_id},
             {

@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Config: {settings.redacted_summary()}")
 
     await connect_db()         # skips if db_tool_mode != mongo
-    await connect_pg()         # skips if db_tool_mode != postgres
+    # await connect_pg()         # skips if db_tool_mode != postgres
     init_container(get_db())   # builds container with whatever is ready
 
     logger.info("Application ready.")
@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("Shutting down...")
     await disconnect_db()
-    await disconnect_pg()
+    # await disconnect_pg()
 
 
 app = FastAPI(

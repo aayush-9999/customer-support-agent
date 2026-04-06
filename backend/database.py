@@ -35,8 +35,6 @@ async def disconnect_db() -> None:
 
 
 def get_db() -> AsyncIOMotorDatabase:
-    if settings.db_tool_mode != "mongo":
-        return None
     if _client is None:
         raise RuntimeError("Database not connected. Call connect_db() first.")
     return _client[settings.mongo_db_name]

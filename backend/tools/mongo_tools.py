@@ -354,8 +354,12 @@ class ChangeDeliveryDate(BaseTool):
             "Request a change to the estimated delivery date of an order. "
             "Automatically approves or creates a pending request based on warehouse schedule. "
             "Use when the customer asks to change, reschedule, or delay their delivery. "
-            "If the customer hasn't specified which order, call get_order_history first "
-            "and confirm the order before calling this tool."
+            "If the customer hasn't specified which order, call get_order_history first. "
+            "IMPORTANT: If the customer says 'sooner' or gives no specific date, you MUST "
+            "call get_order_details first to read estimated_warehouse_date, then compute "
+            "earliest_possible = estimated_warehouse_date + 1 day, tell the customer that "
+            "exact date, and wait for confirmation before calling this tool. "
+            "Never call this tool with a guessed or invented date."
         )
 
     @property

@@ -49,59 +49,68 @@ class GroqService(LLMBase):
         system_prompt: str,
     ) -> AgentResponse:
 
-        groq_messages   = self._build_messages(messages, system_prompt)
-        all_tool_calls:  list[ToolCall]  = []
+        groq_messages     = self._build_messages(messages, system_prompt)
+        all_tool_calls:   list[ToolCall]   = []
         all_tool_results: list[ToolResult] = []
 
+        max_iterations = settings.agent_max_iterations  # your config already has this
+        iteration      = 0
+
         try:
-            # ── Round 1 ────────────────────────────────────────────────────────
-            response = await self._client.chat.completions.create(
-                model       = self._model,
-                messages    = groq_messages,
-                tools       = self._schemas,
-                tool_choice = "auto",
-                temperature = settings.groq_temperature,
-                max_tokens  = settings.groq_max_tokens,
-            )
+            while iteration < max_iterations:
+                iteration += 1
+                logger.info(f"Agent loop iteration {iteration}/{max_iterations}")
 
-            choice  = response.choices[0]
-            message = choice.message
+                # ── Call Groq ──────────────────────────────────────────────────
+                is_last_iteration = (iteration == max_iterations)
 
-            if not message.tool_calls:
-                return AgentResponse(
-                    message      = message.content or "",
-                    tool_calls   = [],
-                    tool_results = [],
+                response = await self._client.chat.completions.create(
+                    model       = self._model,
+                    messages    = groq_messages,
+                    tools       = self._schemas,
+                    # Force text reply on last iteration so we never exit without a message
+                    tool_choice = "none" if is_last_iteration else "auto",
+                    temperature = settings.groq_temperature,
+                    max_tokens  = settings.groq_max_tokens,
                 )
 
-            # Null out narration text from Round 1 (smaller models leak it)
-            groq_messages.append({
-                "role":       "assistant",
-                "content":    None,
-                "tool_calls": message.tool_calls,
-            })
+                choice  = response.choices[0]
+                message = choice.message
 
-            tool_result_dicts, tool_calls_made, tool_results_made = (
-                await self._execute_tool_calls(message.tool_calls)
-            )
-            all_tool_calls.extend(tool_calls_made)
-            all_tool_results.extend(tool_results_made)
-            groq_messages.extend(tool_result_dicts)
+                # ── No tool calls → model is done, return its reply ────────────
+                if not message.tool_calls:
+                    return AgentResponse(
+                        message      = message.content or "",
+                        tool_calls   = all_tool_calls,
+                        tool_results = all_tool_results,
+                    )
 
-            # ── Round 2 ────────────────────────────────────────────────────────
-            response2 = await self._client.chat.completions.create(
-                model       = self._model,
-                messages    = groq_messages,
-                tools       = self._schemas,
-                tool_choice = "none",
-                temperature = min(settings.groq_temperature, 0.1),
-                max_tokens  = _ROUND2_MAX_TOKENS,
-            )
+                # ── Tool calls present → execute them, feed results back ───────
+                # Null out any narration text (smaller models leak it mid-loop)
+                groq_messages.append({
+                    "role":       "assistant",
+                    "content":    None,
+                    "tool_calls": message.tool_calls,
+                })
 
-            final_message = response2.choices[0].message.content or ""
+                tool_result_dicts, tool_calls_made, tool_results_made = (
+                    await self._execute_tool_calls(message.tool_calls)
+                )
+                all_tool_calls.extend(tool_calls_made)
+                all_tool_results.extend(tool_results_made)
 
+                # Append tool results — loop continues, Groq sees them next round
+                groq_messages.extend(tool_result_dicts)
+
+                logger.info(
+                    f"Iteration {iteration}: called "
+                    f"{[tc.tool_name for tc in tool_calls_made]}, looping..."
+                )
+
+            # Should not reach here (last iteration forces tool_choice=none)
+            # but safety net just in case
             return AgentResponse(
-                message      = final_message,
+                message      = "I wasn't able to complete that in time. Please try again.",
                 tool_calls   = all_tool_calls,
                 tool_results = all_tool_results,
             )
@@ -115,7 +124,6 @@ class GroqService(LLMBase):
                 ),
                 error = str(e),
             )
-
     # ── Private ────────────────────────────────────────────────────────────────
 
     def _build_messages(

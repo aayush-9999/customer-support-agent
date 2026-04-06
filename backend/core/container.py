@@ -2,12 +2,12 @@ import logging
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from backend.tools.mongo_tools import get_all_tools
-from backend.tools.pg_tools import get_all_pg_tools
+# from backend.tools.pg_tools import get_all_pg_tools
 from backend.services.groq_service import GroqService
 from backend.policies.file_store import FilePolicyStore
 from backend.services.conversation_store import ConversationStore
-from backend.database_pg import SessionLocal
-import backend.database_pg as pg_db
+# from backend.database_pg import SessionLocal
+# import backend.database_pg as pg_db
 from backend.core.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -15,11 +15,14 @@ class Container:
     def __init__(self, db):
         logger.info("Initialising container...")
 
+        # Safe pattern if you want to keep postgres as a future option
         if settings.db_tool_mode == "mongo":
+            from backend.tools.mongo_tools import get_all_tools
             tools = get_all_tools(db)
             self.conversations = ConversationStore(db=db)
-            logger.info(f"Mongo tools loaded: {len(tools)}")
         elif settings.db_tool_mode == "postgres":
+            from backend.tools.pg_tools import get_all_pg_tools
+            import backend.database_pg as pg_db
             tools = get_all_pg_tools(pg_db.SessionLocal)
             self.conversations = ConversationStore(db=None, session_factory=pg_db.SessionLocal)
         else:
@@ -29,6 +32,7 @@ class Container:
 
         self.groq   = GroqService(tools)
         self.policy = FilePolicyStore()
+        self.tools  = tools
 
         logger.info(f"Container ready — {len(tools)} tools loaded")
 
