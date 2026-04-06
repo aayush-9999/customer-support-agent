@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     mongo_tickets_collection: str = Field(default="tickets")
     mongo_connect_timeout_ms: int = Field(default=5000, gt=0)
 
+
+            
+    postgres_host:            str | None = Field(default=None)
+    postgres_port:            int        = Field(default=5432)
+    postgres_db:              str | None = Field(default=None)
+    postgres_user:            str | None = Field(default=None)
+    postgres_password:        str | None = Field(default=None)
+    postgres_max_connections: int        = Field(default=10)
+
     # ── Agent ──────────────────────────────────────────────────────────────
     agent_max_iterations: int = Field(default=10, gt=0, le=25)
     agent_system_prompt_path: str = Field(
@@ -88,6 +97,15 @@ class Settings(BaseSettings):
     @classmethod
     def temperature_precision(cls, v: float) -> float:
         return round(v, 2)
+
+    @property
+    def postgres_uri(self) -> str | None:
+        if not all([self.postgres_host, self.postgres_db, self.postgres_user, self.postgres_password]):
+            return None
+        return (
+            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
 
     # ── Helpers ────────────────────────────────────────────────────────────
     @property
