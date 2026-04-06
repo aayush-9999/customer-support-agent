@@ -14,8 +14,8 @@ class Role(str, Enum):
 
 
 class Message(BaseModel):
-    role:       Role
-    content:    str
+    role:         Role
+    content:      str
     tool_call_id: str | None = None   # only for role=tool responses
     name:         str | None = None   # tool name, only for role=tool
 
@@ -26,11 +26,18 @@ class ToolCall(BaseModel):
     arguments: dict[str, Any]
 
 
+class ToolResult(BaseModel):
+    """Raw Groq tool result dict — stored so it can be replayed next turn."""
+    tool_call_id: str
+    content:      str   # JSON string of the tool's return value
+
+
 class AgentResponse(BaseModel):
-    message:       str                  # final text response to show customer
-    tool_calls:    list[ToolCall] = []  # what tools were called (for logging)
-    was_escalated: bool = False         # did we hit an escalation trigger
-    error:         str | None = None    # if something went wrong
+    message:       str
+    tool_calls:    list[ToolCall]  = []
+    tool_results:  list[ToolResult] = []   # ← NEW: parallel to tool_calls
+    was_escalated: bool = False
+    error:         str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -41,7 +48,7 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    reply:        str
-    session_id:   str
+    reply:         str
+    session_id:    str
     was_escalated: bool = False
-    timestamp:    datetime = Field(default_factory=datetime.utcnow)
+    timestamp:     datetime = Field(default_factory=datetime.utcnow)

@@ -1,4 +1,7 @@
 # backend/tools/mongo_tools.py
+# Diff from original: ChangeDeliveryDate.execute() now calls
+# ws_manager.broadcast_to_admins() after inserting a pending_request,
+# so the CRM gets a push instead of waiting for a 10s poll.
 
 import logging
 from datetime import datetime, timezone, timedelta
@@ -499,6 +502,20 @@ class ChangeDeliveryDate(BaseTool):
                     }
                 }}
             )
+
+            # ── FIX: push to all connected CRM admin tabs immediately.
+            # Import here (not at module top) to avoid circular imports since
+            # ws_manager lives in the api layer.
+            try:
+                from backend.api.websocket import ws_manager
+                await ws_manager.broadcast_to_admins({
+                    "type":       "new_request",
+                    "request_id": request_id,
+                    "order_id":   order_id,
+                })
+            except Exception as broadcast_err:
+                # Never let a failed broadcast block the tool response.
+                logger.warning(f"Admin broadcast failed: {broadcast_err}")
 
             return self.success({
                 "outcome":   "pending_approval",

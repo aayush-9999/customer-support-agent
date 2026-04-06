@@ -1,146 +1,191 @@
 // frontend/src/hooks/useChat.js
 
-import { useState, useCallback, useRef, useEffect } from "react";
-import { sendMessage, getNewSession, getConversationHistory } from "../api";
+import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  sendMessage,
+  getConversationHistory,
+  getNewSession,
+  closeConversation,
+} from "../api.js";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function makeBubble(role, content, extra = {}) {
+  return {
+    id:        crypto.randomUUID(),
+    role,
+    content,
+    timestamp: new Date().toISOString(),
+    ...extra,
+  };
+}
+
+function makeNotification(content, status) {
+  return {
+    id:             crypto.randomUUID(),
+    isNotification: true,
+    status,            // "approved" | "rejected"
+    content,
+    timestamp:      new Date().toISOString(),
+  };
+}
+
+function buildWsUrl(sessionId) {
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${window.location.host}/ws/${sessionId}`;
+}
+
+// ── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useChat(user) {
-  const [messages,       setMessages]       = useState([]);
-  const [loading,        setLoading]        = useState(false);
-  const [sessionId,      setSessionId]      = useState(null);
-  const [conversations,  setConversations]  = useState([]);
-  const [historyLoaded,  setHistoryLoaded]  = useState(false);
-  const wsRef      = useRef(null);
-  const sessionRef = useRef(null);
+  const [messages, setMessages]           = useState([]);
+  const [loading, setLoading]             = useState(false);
+  const [sessionId, setSessionId]         = useState(null);
+  const [conversations, setConversations] = useState([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
 
-  // ── Load conversation history on mount ─────────────────────────────────────
-  useEffect(() => {
-    if (!user) return;
-    getConversationHistory()
-      .then(data => {
-        setConversations(data.conversations || []);
-        setHistoryLoaded(true);
-      })
-      .catch(() => setHistoryLoaded(true));
-  }, [user]);
+  const wsRef = useRef(null);
 
-  // ── WebSocket setup ────────────────────────────────────────────────────────
-  const openWebSocket = useCallback((sid) => {
-    if (wsRef.current) return;
+  // ── WebSocket connect ──────────────────────────────────────────────────────
+  const connectWs = useCallback((sid) => {
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+    }
 
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${window.location.host}/ws/${sid}`);
-
-    let pingTimer;
-
-    ws.onopen = () => {
-      pingTimer = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) ws.send("ping");
-      }, 25000);
-    };
-
-    ws.onmessage = (event) => {
-      if (event.data === "pong") return;
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === "request_resolved") {
-          setMessages(prev => [...prev, {
-            id:             `notify-${Date.now()}`,
-            role:           "assistant",
-            content:        payload.message,
-            isNotification: true,
-            status:         payload.status, // "approved" | "rejected"
-            timestamp:      new Date().toISOString(),
-          }]);
-        }
-      } catch {}
-    };
-
-    ws.onclose = () => {
-      clearInterval(pingTimer);
-      wsRef.current = null;
-    };
-
+    const ws = new WebSocket(buildWsUrl(sid));
     wsRef.current = ws;
+
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (msg.type === "request_resolved") {
+          setMessages((prev) => [
+            ...prev,
+            makeNotification(msg.message, msg.status),
+          ]);
+        }
+      } catch { /* ignore malformed frames */ }
+    };
+
+    ws.onerror = () => ws.close();
   }, []);
 
-  // ── Ensure session exists ──────────────────────────────────────────────────
-  const ensureSession = useCallback(async () => {
-    if (sessionRef.current) return sessionRef.current;
-    const sid = await getNewSession();
-    sessionRef.current = sid;
-    setSessionId(sid);
-    openWebSocket(sid);
-    return sid;
-  }, [openWebSocket]);
+  // ── Init on login ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!user) {
+      setMessages([]);
+      setSessionId(null);
+      setConversations([]);
+      setHistoryLoaded(false);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      return;
+    }
 
-  // ── Send message ───────────────────────────────────────────────────────────
-  // No orderId parameter — the agent handles order disambiguation internally.
+    let cancelled = false;
+
+    async function init() {
+      // Load sidebar history
+      try {
+        const data = await getConversationHistory();
+        if (!cancelled) {
+          setConversations(data.conversations || []);
+        }
+      } catch { /* sidebar fails silently */ }
+
+      if (!cancelled) setHistoryLoaded(true);
+
+      // Start fresh session
+      try {
+        // getNewSession() already returns the session_id string (see api.js)
+        const sid = await getNewSession();
+        if (!cancelled) {
+          setSessionId(sid);
+          connectWs(sid);
+        }
+      } catch {
+        if (!cancelled) {
+          const sid = crypto.randomUUID();
+          setSessionId(sid);
+          connectWs(sid);
+        }
+      }
+    }
+
+    init();
+    return () => { cancelled = true; };
+  }, [user, connectWs]);
+
+  // ── Load a past conversation from the sidebar ──────────────────────────────
+  const loadConversation = useCallback((conv) => {
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+    }
+
+    // KEY FIX: role="notification" rows → banner pills, not bubbles.
+    // Any unknown/legacy role is silently skipped.
+    const restored = (conv.messages || []).flatMap((m) => {
+      if (m.role === "notification") {
+        return [makeNotification(m.content, m.status || "approved")];
+      }
+      if (m.role === "user" || m.role === "assistant") {
+        return [makeBubble(m.role, m.content, { timestamp: m.timestamp })];
+      }
+      return [];
+    });
+
+    setMessages(restored);
+    setSessionId(conv.session_id);
+    connectWs(conv.session_id);
+  }, [connectWs]);
+
+  // ── Start a new blank chat ─────────────────────────────────────────────────
+  const newChat = useCallback(async () => {
+    setMessages([]);
+    setLoading(false);
+    try {
+      const sid = await getNewSession();
+      setSessionId(sid);
+      connectWs(sid);
+    } catch {
+      const sid = crypto.randomUUID();
+      setSessionId(sid);
+      connectWs(sid);
+    }
+  }, [connectWs]);
+
+  // ── Send a message ─────────────────────────────────────────────────────────
+  // api.js sendMessage signature: sendMessage({ message, sessionId })
   const send = useCallback(async (text) => {
-    if (!text.trim() || loading) return;
+    if (!text.trim() || loading || !sessionId) return;
 
-    const userMsg = {
-      id:        `u-${Date.now()}`,
-      role:      "user",
-      content:   text,
-      timestamp: new Date().toISOString(),
-    };
-    setMessages(prev => [...prev, userMsg]);
+    setMessages((prev) => [...prev, makeBubble("user", text)]);
     setLoading(true);
 
     try {
-      const sid = await ensureSession();
-      const response = await sendMessage({ message: text, sessionId: sid });
-
-      setMessages(prev => [...prev, {
-        id:           `a-${Date.now()}`,
-        role:         "assistant",
-        content:      response.reply,
-        wasEscalated: response.was_escalated,
-        timestamp:    response.timestamp,
-      }]);
-    } catch (err) {
-      setMessages(prev => [...prev, {
-        id:      `e-${Date.now()}`,
-        role:    "assistant",
-        content: err.message || "Something went wrong. Please try again.",
-        isError: true,
-      }]);
+      const data = await sendMessage({ message: text, sessionId });
+      setMessages((prev) => [
+        ...prev,
+        makeBubble("assistant", data.reply, {
+          wasEscalated: data.was_escalated,
+        }),
+      ]);
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        makeBubble("assistant", "Something went wrong. Please try again.", {
+          isError: true,
+        }),
+      ]);
     } finally {
       setLoading(false);
     }
-  }, [loading, ensureSession]);
-
-  // ── Load a past conversation into the current view ─────────────────────────
-  const loadConversation = useCallback((conv) => {
-    wsRef.current?.close();
-    wsRef.current = null;
-
-    const restored = conv.messages.map((m, i) => ({
-      id:        `hist-${i}`,
-      role:      m.role,
-      content:   m.content,
-      timestamp: m.timestamp,
-    }));
-    setMessages(restored);
-
-    sessionRef.current = conv.session_id;
-    setSessionId(conv.session_id);
-    openWebSocket(conv.session_id);
-  }, [openWebSocket]);
-
-  // ── Start a fresh session ──────────────────────────────────────────────────
-  const newChat = useCallback(() => {
-    wsRef.current?.close();
-    wsRef.current = null;
-    sessionRef.current = null;
-    setSessionId(null);
-    setMessages([]);
-  }, []);
-
-  // ── Cleanup on unmount ─────────────────────────────────────────────────────
-  useEffect(() => {
-    return () => { wsRef.current?.close(); };
-  }, []);
+  }, [loading, sessionId]);
 
   return {
     messages,

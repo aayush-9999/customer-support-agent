@@ -161,17 +161,18 @@ async def approve_request(
         f"{req['requested_value'].strftime('%B %d, %Y')}."
     )
 
-    # ── Bug 3 fix: persist to conversation history ──────────────────────────
     session_id = str(req.get("session_id", ""))
+
+    # ── FIX: persist as a proper "notification" role, NOT a fake user/assistant pair.
+    # This means on history load it will be rendered as a banner pill, not a bubble.
     if session_id:
-        await conversations.append_turn(
-            session_id   = session_id,
-            user_message = "[Admin notification]",   # sentinel — not shown to user
-            bot_reply    = approval_message,
-            tool_calls   = [],
+        await conversations.append_notification(
+            session_id = session_id,
+            message    = approval_message,
+            status     = "approved",
         )
 
-    # Notify if online (existing code)
+    # Notify the customer's live session if they're currently online
     await ws_manager.notify_session(
         session_id = session_id,
         payload    = {
@@ -194,7 +195,7 @@ async def reject_request(
     body:         ResolutionBody = ResolutionBody(),
     current_user: dict = Depends(get_current_admin),
     db:           AsyncIOMotorDatabase = Depends(get_db),
-    conversations: ConversationStore = Depends(get_conversations),  # ← add
+    conversations: ConversationStore = Depends(get_conversations),
 ):
     try:
         rid = ObjectId(request_id)
@@ -240,14 +241,14 @@ async def reject_request(
         f"Reason: {body.note or 'No reason provided'}."
     )
 
-    # ── Bug 3 fix: persist to conversation history ──────────────────────────
     session_id = str(req.get("session_id", ""))
+
+    # ── FIX: persist as a proper "notification" role, NOT a fake user/assistant pair.
     if session_id:
-        await conversations.append_turn(
-            session_id   = session_id,
-            user_message = "[Admin notification]",
-            bot_reply    = rejection_message,
-            tool_calls   = [],
+        await conversations.append_notification(
+            session_id = session_id,
+            message    = rejection_message,
+            status     = "rejected",
         )
 
     await ws_manager.notify_session(
@@ -264,6 +265,7 @@ async def reject_request(
         "request_id": request_id,
         "note":       body.note,
     }
+
 
 @router.get("/requests/stats")
 async def get_stats(

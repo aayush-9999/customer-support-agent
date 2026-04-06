@@ -6,7 +6,7 @@ from typing import Any
 
 from groq import AsyncGroq
 
-from backend.agent.schemas import AgentResponse, Message, Role, ToolCall
+from backend.agent.schemas import AgentResponse, Message, Role, ToolCall, ToolResult
 from backend.core.config import get_settings
 from backend.services.llm_base import LLMBase
 from backend.tools.base import BaseTool
@@ -14,9 +14,11 @@ from backend.tools.base import BaseTool
 logger   = logging.getLogger(__name__)
 settings = get_settings()
 
-# Round 2 (after tool results) only needs to generate a short reply.
-# Keeping this low reduces TPM usage and avoids hitting rate limits.
 _ROUND2_MAX_TOKENS = 600
+
+# Marker prefix used to encode tool_call history rows as assistant messages.
+# routes.py writes these when rebuilding history; _build_messages() decodes them.
+_TOOL_CALLS_MARKER = "__tool_calls__:"
 
 
 class GroqService(LLMBase):
@@ -24,21 +26,21 @@ class GroqService(LLMBase):
     Groq implementation of LLMBase.
 
     Flow per request:
-      1. Build Groq-format messages from our Message objects
-      2. Send to Groq with tool schemas (Round 1)
-      3. If Groq returns tool_calls → execute each tool → send results back
-      4. Get final text response (Round 2) → return AgentResponse
+      Round 1 — send full context with tool schemas → model may call tools
+      Round 2 — send tool results → model writes final reply
 
-    Two rounds of Groq calls per tool-using turn.
-    Round 1: full context + tool schemas
-    Round 2: tool results only, no more tool calls, shorter max_tokens
+    History replay:
+      When a previous turn used tools, routes.py encodes those tool calls as
+      assistant messages prefixed with __tool_calls__:. _build_messages()
+      decodes them back into the proper Groq tool_calls structure so the model
+      has full context of what it did and what the tools returned.
     """
 
     def __init__(self, tools: list[BaseTool]):
-        self._client   = AsyncGroq(api_key=settings.groq_api_key)
-        self._model    = settings.groq_model
-        self._tools    = {tool.name: tool for tool in tools}
-        self._schemas  = [tool.to_groq_schema() for tool in tools]
+        self._client  = AsyncGroq(api_key=settings.groq_api_key)
+        self._model   = settings.groq_model
+        self._tools   = {tool.name: tool for tool in tools}
+        self._schemas = [tool.to_groq_schema() for tool in tools]
 
     async def chat(
         self,
@@ -47,11 +49,12 @@ class GroqService(LLMBase):
         system_prompt: str,
     ) -> AgentResponse:
 
-        groq_messages = self._build_messages(messages, system_prompt)
-        all_tool_calls: list[ToolCall] = []
+        groq_messages   = self._build_messages(messages, system_prompt)
+        all_tool_calls:  list[ToolCall]  = []
+        all_tool_results: list[ToolResult] = []
 
         try:
-            # ── Round 1: initial LLM call ──────────────────────────────────
+            # ── Round 1 ────────────────────────────────────────────────────────
             response = await self._client.chat.completions.create(
                 model       = self._model,
                 messages    = groq_messages,
@@ -64,34 +67,28 @@ class GroqService(LLMBase):
             choice  = response.choices[0]
             message = choice.message
 
-            # ── No tool calls → return directly ───────────────────────────
             if not message.tool_calls:
                 return AgentResponse(
-                    message    = message.content or "",
-                    tool_calls = [],
+                    message      = message.content or "",
+                    tool_calls   = [],
+                    tool_results = [],
                 )
 
-            # ── Tool calls → execute them ──────────────────────────────────
-            # Strip the text content from Round 1's assistant message before
-            # appending. Smaller models generate a narration alongside tool_calls
-            # ("I'm going to look that up..."). If that text reaches Round 2,
-            # the model treats it as context and keeps narrating. Nulling it out
-            # keeps the conversation clean — only the tool_calls array matters here.
+            # Null out narration text from Round 1 (smaller models leak it)
             groq_messages.append({
                 "role":       "assistant",
                 "content":    None,
                 "tool_calls": message.tool_calls,
             })
 
-            tool_results, tool_calls_made = await self._execute_tool_calls(
-                message.tool_calls
+            tool_result_dicts, tool_calls_made, tool_results_made = (
+                await self._execute_tool_calls(message.tool_calls)
             )
             all_tool_calls.extend(tool_calls_made)
-            groq_messages.extend(tool_results)
+            all_tool_results.extend(tool_results_made)
+            groq_messages.extend(tool_result_dicts)
 
-            # ── Round 2: send tool results back ────────────────────────────
-            # Lower temperature on Round 2 — the reply should be factual and
-            # grounded in the tool result, not creative. This reduces hallucination.
+            # ── Round 2 ────────────────────────────────────────────────────────
             response2 = await self._client.chat.completions.create(
                 model       = self._model,
                 messages    = groq_messages,
@@ -104,8 +101,9 @@ class GroqService(LLMBase):
             final_message = response2.choices[0].message.content or ""
 
             return AgentResponse(
-                message    = final_message,
-                tool_calls = all_tool_calls,
+                message      = final_message,
+                tool_calls   = all_tool_calls,
+                tool_results = all_tool_results,
             )
 
         except Exception as e:
@@ -118,14 +116,21 @@ class GroqService(LLMBase):
                 error = str(e),
             )
 
-    # ── Private helpers ────────────────────────────────────────────────────────
+    # ── Private ────────────────────────────────────────────────────────────────
 
     def _build_messages(
         self,
         messages:      list[Message],
         system_prompt: str,
     ) -> list[dict]:
-        """Convert our Message objects to Groq's dict format."""
+        """
+        Convert Message objects to Groq's dict format.
+
+        Special case: assistant messages whose content starts with
+        __tool_calls__: are encoded tool history rows from routes.py.
+        We decode them back into the Groq tool_calls structure so the
+        model sees its previous tool invocations in the correct format.
+        """
         groq_messages = [{"role": "system", "content": system_prompt}]
 
         for msg in messages:
@@ -135,11 +140,39 @@ class GroqService(LLMBase):
                     "content":      msg.content,
                     "tool_call_id": msg.tool_call_id,
                 })
+
             elif msg.role == Role.assistant:
-                groq_messages.append({
-                    "role":    "assistant",
-                    "content": msg.content,
-                })
+                if msg.content and msg.content.startswith(_TOOL_CALLS_MARKER):
+                    # Decode the stored tool call back into Groq format
+                    payload_str = msg.content[len(_TOOL_CALLS_MARKER):]
+                    try:
+                        payload = json.loads(payload_str)
+                        # Reconstruct Groq-compatible tool_calls list
+                        fake_tool_calls = [
+                            {
+                                "id":   tc["id"],
+                                "type": "function",
+                                "function": {
+                                    "name":      tc["name"],
+                                    "arguments": json.dumps(tc["arguments"]),
+                                },
+                            }
+                            for tc in payload
+                        ]
+                        groq_messages.append({
+                            "role":       "assistant",
+                            "content":    None,
+                            "tool_calls": fake_tool_calls,
+                        })
+                    except Exception:
+                        # Malformed payload — skip this row gracefully
+                        logger.warning("Failed to decode __tool_calls__ history row")
+                else:
+                    groq_messages.append({
+                        "role":    "assistant",
+                        "content": msg.content,
+                    })
+
             elif msg.role == Role.user:
                 groq_messages.append({
                     "role":    "user",
@@ -151,9 +184,10 @@ class GroqService(LLMBase):
     async def _execute_tool_calls(
         self,
         tool_calls: list[Any],
-    ) -> tuple[list[dict], list[ToolCall]]:
-        result_messages  = []
-        tool_calls_made  = []
+    ) -> tuple[list[dict], list[ToolCall], list[ToolResult]]:
+        result_dicts   = []
+        tool_calls_out = []
+        tool_results_out = []
 
         for tc in tool_calls:
             tool_name = tc.function.name
@@ -173,16 +207,21 @@ class GroqService(LLMBase):
                 logger.info(f"Executing tool: {tool_name} with args: {arguments}")
                 result = await tool.execute(**arguments)
 
-            tool_calls_made.append(ToolCall(
+            result_content = json.dumps(result)
+
+            tool_calls_out.append(ToolCall(
                 id        = tool_id,
                 tool_name = tool_name,
                 arguments = arguments,
             ))
-
-            result_messages.append({
+            tool_results_out.append(ToolResult(
+                tool_call_id = tool_id,
+                content      = result_content,
+            ))
+            result_dicts.append({
                 "role":         "tool",
                 "tool_call_id": tool_id,
-                "content":      json.dumps(result),
+                "content":      result_content,
             })
 
-        return result_messages, tool_calls_made
+        return result_dicts, tool_calls_out, tool_results_out
