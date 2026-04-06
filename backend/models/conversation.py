@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from sqlalchemy import String, DateTime, ForeignKey, JSON, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from backend.database_pg import Base
+from backend.models.base import Base
 
 
 class Conversation(Base):

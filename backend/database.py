@@ -26,6 +26,7 @@ async def connect_db() -> None:
     await _client.admin.command("ping")
     logger.info(f"MongoDB connected — db: {settings.mongo_db_name}")
 
+
 async def disconnect_db() -> None:
     global _client
     if _client:
@@ -34,7 +35,9 @@ async def disconnect_db() -> None:
         logger.info("MongoDB disconnected")
 
 
-def get_db() -> AsyncIOMotorDatabase:
+def get_db():
+    if settings.db_tool_mode != "mongo":
+        return None
     if _client is None:
         raise RuntimeError("Database not connected. Call connect_db() first.")
     return _client[settings.mongo_db_name]

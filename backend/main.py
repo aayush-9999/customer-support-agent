@@ -1,11 +1,10 @@
 # backend/main.py
-# Diff from original: adds /ws/admin WebSocket endpoint for CRM push notifications.
 
 import logging
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.core.config import get_settings
@@ -22,28 +21,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.app_name} [{settings.environment}]")
     logger.info(f"Config: {settings.redacted_summary()}")
+    logger.info(f"DB mode: {settings.db_tool_mode}")
 
-    await connect_db()         # skips if db_tool_mode != mongo
-    # await connect_pg()         # skips if db_tool_mode != postgres
-    init_container(get_db())   # builds container with whatever is ready
+    await connect_db()          # self-skips if db_tool_mode != mongo
+    await connect_pg()          # self-skips if db_tool_mode != postgres
+    init_container(get_db())    # builds container after DB is ready
 
     logger.info("Application ready.")
     yield
 
     logger.info("Shutting down...")
     await disconnect_db()
-    # await disconnect_pg()
+    await disconnect_pg()
 
 
 app = FastAPI(
-    title    = settings.app_name,
-    version  = "0.1.0",
-    lifespan = lifespan,
-    docs_url = "/docs",
+    title     = settings.app_name,
+    version   = "0.1.0",
+    lifespan  = lifespan,
+    docs_url  = "/docs",
     redoc_url = None,
 )
 
@@ -65,8 +66,6 @@ from backend.api.admin import router as admin_router
 app.include_router(admin_router, prefix="/api")
 
 
-# ── Customer chat WebSocket ────────────────────────────────────────────────────
-
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await ws_manager.connect(session_id, websocket)
@@ -77,22 +76,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         ws_manager.disconnect(session_id)
 
 
-# ── Admin CRM WebSocket ────────────────────────────────────────────────────────
-# The CRM frontend connects here on login.  When a new pending_request is
-# created (in mongo_tools.py ChangeDeliveryDate.execute), the backend calls
-# ws_manager.broadcast_to_admins(...) and every connected CRM tab gets the
-# push instantly — no polling needed.
-#
-# We use a random admin_id per connection rather than the admin's email so
-# multiple browser tabs from the same admin each get their own slot.
-
 @app.websocket("/ws/admin")
 async def admin_websocket_endpoint(websocket: WebSocket):
-    admin_id = str(uuid.uuid4())   # unique per connection, not per admin user
+    admin_id = str(uuid.uuid4())
     await ws_manager.connect_admin(admin_id, websocket)
     try:
         while True:
-            # Keep the connection alive; we don't process inbound messages.
             await websocket.receive_text()
     except WebSocketDisconnect:
         ws_manager.disconnect_admin(admin_id)

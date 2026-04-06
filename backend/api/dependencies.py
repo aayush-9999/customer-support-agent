@@ -10,11 +10,11 @@ from bson import ObjectId
 
 from backend.core.config import get_settings
 from backend.core.security import decode_token
+from backend.core.container import get_container
 from backend.database import get_db
 from backend.database_pg import get_pg_session
 from backend.models.user import User
 from backend.services.conversation_store import ConversationStore
-from backend.core.container import get_container
 from backend.tools.base import BaseTool
 
 logger   = logging.getLogger(__name__)
@@ -22,12 +22,10 @@ settings = get_settings()
 bearer   = HTTPBearer()
 
 
-# ── Current user ──────────────────────────────────────────────────────────────
-
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer),
     db:          AsyncIOMotorDatabase         = Depends(get_db),
-    session:     AsyncSession                 = Depends(get_db),
+    session:     AsyncSession                 = Depends(get_pg_session),
 ) -> dict:
     token   = credentials.credentials
     payload = decode_token(token)
@@ -68,8 +66,6 @@ async def get_current_user(
     return user
 
 
-# ── Admin guard ───────────────────────────────────────────────────────────────
-
 async def get_current_admin(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
@@ -77,8 +73,6 @@ async def get_current_admin(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
 
-
-# ── Service dependencies ──────────────────────────────────────────────────────
 
 def get_groq():
     return get_container().groq

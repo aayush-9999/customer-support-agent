@@ -4,15 +4,13 @@ import logging
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from pymongo import DESCENDING
 
 from backend.agent.loop import run_agent
 from backend.agent.schemas import ChatRequest, ChatResponse
-from backend.api.dependencies import get_groq, get_policy, get_current_user, get_tools
+from backend.api.dependencies import get_current_user, get_groq, get_policy, get_conversations, get_tools
 from backend.policies.file_store import FilePolicyStore
 from backend.services.llm_base import LLMBase
 from backend.services.conversation_store import ConversationStore
-from backend.api.dependencies import get_conversations
 from backend.agent.schemas import Message, Role
 from backend.database import get_db                          # ← add this
 from motor.motor_asyncio import AsyncIOMotorDatabase         # ← add this too
@@ -37,11 +35,11 @@ async def chat(
     policy:        FilePolicyStore   = Depends(get_policy),
     conversations: ConversationStore = Depends(get_conversations),
     db: AsyncIOMotorDatabase = Depends(get_db),
-    tools:         list[BaseTool]       = Depends(get_tools),
+    tools:         list[BaseTool]    = Depends(get_tools),   
 ):
     try:
         # Ensure conversation document exists for this session
-        await conversations.get_or_create(
+        conv = await conversations.get_or_create(
             session_id = body.session_id,
             user_id    = str(current_user["_id"]),
         )
@@ -53,33 +51,22 @@ async def chat(
             order_id   = body.order_id,
         )
 
-        conv = await conversations.get_or_create(
-            session_id = body.session_id,
-            user_id    = str(current_user["_id"]),
-        )
-
-        # Convert stored dicts to Message objects the agent understands
-        VALID_ROLES = {"user", "assistant", "tool"}
-
         history: list[Message] = [
-            Message(
-                role         = Role(m["role"]),
-                content      = m["content"],
-                tool_call_id = m.get("tool_call_id"),
-            )
+            Message(role=Role(m["role"]), content=m["content"])
             for m in conv.get("messages", [])
-            if m["role"] in VALID_ROLES
+            if m["role"] in ("user", "assistant")
         ]
 
         response = await run_agent(
             request      = request,
             llm          = llm,
             policy_store = policy,
-            tools = tools,
+            tools        = tools,   
             history      = history,
         )
 
-        if any(tc.tool_name == "change_delivery_date" for tc in response.tool_calls):
+        if db is not None and any(tc.tool_name == "change_delivery_date" for tc in response.tool_calls):
+            from pymongo import DESCENDING
             await db.pending_requests.find_one_and_update(
                 {
                     "user_id": ObjectId(str(current_user["_id"])),
@@ -90,14 +77,12 @@ async def chat(
                 sort=[("created_at", DESCENDING)],
             )
 
-
         # Save turn to conversation history
         await conversations.append_turn(
             session_id   = body.session_id,
             user_message = body.message,
             bot_reply    = response.message,
             tool_calls   = response.tool_calls,
-            tool_results = response.tool_results,
         )
 
         return ChatResponse(
