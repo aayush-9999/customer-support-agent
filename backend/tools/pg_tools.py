@@ -9,6 +9,112 @@ from backend.tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
 
+# ── 1. Get Order History (list) ─────────────────────────────────────────────
+
+class GetOrderHistoryPG(BaseTool):
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+
+    @property
+    def name(self) -> str:
+        return "get_order_history"
+
+    @property
+    def description(self) -> str:
+        return (
+            "List all orders for a customer using their email address. "
+            "Returns a summary list: order IDs, statuses, dates, and totals. "
+            "Use when the customer asks 'my orders', 'order history', "
+            "'how many orders do I have', 'second last order', 'previous order'. "
+            "To get full item details for a specific order, follow up with get_order_details."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "Customer's email address"
+                }
+            },
+            "required": ["email"]
+        }
+
+    async def execute(self, **kwargs: Any) -> dict:
+        email = kwargs.get("email", "").strip().lower()
+        if not email:
+            return self.error("email is required.")
+
+        try:
+            async with self._session_factory() as session:
+
+                user_result = await session.execute(
+                    text("SELECT id FROM users WHERE LOWER(email) = :email"),
+                    {"email": email}
+                )
+                if not user_result.mappings().first():
+                    return self.error(f"No account found for email: {email}")
+
+                customer_result = await session.execute(
+                    text("SELECT customer_id FROM customers WHERE LOWER(email) = :email"),
+                    {"email": email}
+                )
+                customer = customer_result.mappings().first()
+                if not customer:
+                    return self.error("No order history found for this account.")
+
+                rows = await session.execute(
+                    text("""
+                        SELECT
+                            o.order_id,
+                            o.order_status,
+                            o.order_purchase_timestamp,
+                            o.order_estimated_delivery_date,
+                            agg_pay.total_payment_value
+                        FROM orders o
+                        LEFT JOIN (
+                            SELECT order_id, SUM(payment_value) AS total_payment_value
+                            FROM order_payments
+                            GROUP BY order_id
+                        ) agg_pay ON agg_pay.order_id = o.order_id
+                        WHERE o.customer_id = :customer_id
+                        ORDER BY o.order_purchase_timestamp DESC
+                    """),
+                    {"customer_id": customer["customer_id"]}
+                )
+                rows = rows.mappings().all()
+
+                if not rows:
+                    return self.success({
+                        "orders": [],
+                        "message": "No orders found for this account."
+                    })
+
+                orders = [
+                    {
+                        "order_id":           row["order_id"],
+                        "status":             row["order_status"],
+                        "placed_at":          str(row["order_purchase_timestamp"]) if row["order_purchase_timestamp"] else None,
+                        "estimated_delivery": str(row["order_estimated_delivery_date"]) if row["order_estimated_delivery_date"] else None,
+                        "total_paid":         float(row["total_payment_value"]) if row["total_payment_value"] else None,
+                    }
+                    for row in rows
+                ]
+
+                return self.success({
+                    "email":        email,
+                    "total_orders": len(orders),
+                    "orders":       orders,
+                })
+
+        except Exception as e:
+            logger.exception(f"get_order_history failed for {email}")
+            return self.error(f"Failed to retrieve order history: {str(e)}")
+
+
+# ── 2. Get Order Details (single, full) ─────────────────────────────────────
 
 class GetOrderDetailsPG(BaseTool):
     def __init__(self, session_factory):
@@ -16,16 +122,17 @@ class GetOrderDetailsPG(BaseTool):
 
     @property
     def name(self) -> str:
-        return "get_order_details_pg"
+        return "get_order_details"
 
     @property
     def description(self) -> str:
         return (
-            "Retrieve what a customer ordered using their email address. "
-            "Returns the latest order (or a specific order) with product names, "
-            "quantities, prices, payment method, order status, and delivery dates. "
-            "Use when the customer asks 'what did I order', 'my orders', "
-            "'what did I buy', 'show my purchases', or asks about a specific order."
+            "Retrieve full details of a single order: products, prices, "
+            "payment method, status, and delivery dates. "
+            "Pass order_id for a specific order. "
+            "If no order_id is given, returns the customer's most recent order. "
+            "Use when the customer asks 'what did I order', 'show my latest order', "
+            "or after get_order_history to drill into a specific order."
         )
 
     @property
@@ -39,12 +146,12 @@ class GetOrderDetailsPG(BaseTool):
                 },
                 "order_id": {
                     "type": "string",
-                    "description": "Specific order ID if customer is asking about one order (optional)"
+                    "description": "Specific order ID (optional — omit for latest order)"
                 }
             },
             "required": ["email"]
         }
-
+ 
     async def execute(self, **kwargs: Any) -> dict:
         email    = kwargs.get("email", "").strip().lower()
         order_id = kwargs.get("order_id", "").strip() or None
@@ -146,6 +253,7 @@ class GetOrderDetailsPG(BaseTool):
                 # ── 5. Build response ────────────────────────────────────
                 first = rows[0]
                 order = {
+                    "email":        email,
                     "order_id":           first["order_id"],
                     "status":             first["order_status"],
                     "placed_at":          str(first["order_purchase_timestamp"]) if first["order_purchase_timestamp"] else None,
@@ -181,16 +289,16 @@ class GetOrderStatusPG(BaseTool):
 
     @property
     def name(self) -> str:
-        return "get_order_status_pg"
+        return "get_order_status"
 
     @property
     def description(self) -> str:
         return (
-            "Get the current status of a specific order using the order ID. "
-            "Returns the status, a plain-language explanation, order date, "
-            "estimated delivery, and a delay flag if the order is overdue. "
-            "Use when the customer asks 'where is my order', 'has my order shipped', "
-            "or any question about the current state of an order."
+            "Get the current status and tracking state of an order. "
+            "Returns status, plain-language explanation, estimated delivery, "
+            "and a delay flag if the order is overdue. "
+            "Use when the customer asks 'where is my order', 'has it shipped', "
+            "'is my order delayed', or 'when will it arrive'."
         )
 
     @property
@@ -296,6 +404,7 @@ class GetOrderStatusPG(BaseTool):
                 raw_status = row["order_status"] or "unavailable"
 
                 result = {
+                    "email":        email,
                     "order_id":    order_id,
                     "status":      raw_status,
                     "explanation": row["status_description"],
@@ -324,6 +433,7 @@ class GetOrderStatusPG(BaseTool):
 
 def get_all_pg_tools(session_factory) -> list[BaseTool]:
     return [
+        GetOrderHistoryPG(session_factory),
         GetOrderDetailsPG(session_factory),
         GetOrderStatusPG(session_factory),
     ]
