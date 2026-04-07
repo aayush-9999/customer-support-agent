@@ -80,17 +80,18 @@ async def chat(
             history      = history,
         )
 
-        if any(tc.tool_name == "change_delivery_date" for tc in response.tool_calls):
+        TOOLS_NEEDING_SESSION = {"change_delivery_date", "initiate_return"}
+ 
+        if any(tc.tool_name in TOOLS_NEEDING_SESSION for tc in response.tool_calls):
             await db.pending_requests.find_one_and_update(
                 {
-                    "user_id": ObjectId(str(current_user["_id"])),
-                    "status": "pending",
+                    "user_id":    ObjectId(str(current_user["_id"])),
+                    "status":     "pending",
                     "session_id": None,
                 },
                 {"$set": {"session_id": body.session_id}},
                 sort=[("created_at", DESCENDING)],
             )
-
 
         # Save turn to conversation history
         await conversations.append_turn(
