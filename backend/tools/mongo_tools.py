@@ -38,6 +38,15 @@ def _serialize(doc: dict) -> dict:
             result[k] = v
     return result
 
+def serialize_dates(obj):
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, list):
+        return [serialize_dates(i) for i in obj]
+    if isinstance(obj, dict):
+        return {k: serialize_dates(v) for k, v in obj.items()}
+    return obj
+
 
 # ── 1. Get Order Details ────────────────────────────────────────────────────────
 
@@ -646,6 +655,356 @@ class ChangeDeliveryAddress(BaseTool):
             logger.exception(f"change_delivery_address failed for {order_id}")
             return self.error(f"Failed to update address: {str(e)}")
 
+# ── 7. Get Order Tracking ──────────────────────────────────────────────────
+
+class GetOrderTracking(BaseTool):
+    def __init__(self, db: AsyncIOMotorDatabase):
+        self._db = db
+
+    @property
+    def name(self) -> str:
+        return "get_order_tracking"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Provide complete real-time order tracking details for a specific order. "
+            "Returns current status, estimated dates, products, shipping address, "
+            "any delivery date change requests, invoice summary, and status history. "
+            "Use this tool when the customer asks 'where is my order', 'track my package', "
+            "'order status', 'when will it arrive', or wants full tracking information. "
+            "Always use after confirming the correct order with get_order_history."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "order_id": {
+                    "type": "string",
+                    "description": "The confirmed order ID (ObjectId string) from get_order_history"
+                },
+                "email": {
+                    "type": "string",
+                    "description": "The customer's email address"
+                }
+            },
+            "required": ["order_id", "email"]
+        }
+
+    async def execute(self, **kwargs: Any) -> dict:
+        order_id = kwargs.get("order_id", "").strip()
+        email    = kwargs.get("email", "").strip().lower()
+
+        if not order_id:
+            return self.error("order_id is required.")
+        if not email:
+            return self.error("email is required.")
+
+        try:
+            oid = ObjectId(order_id)
+        except Exception:
+            return self.error("Invalid order ID format.")
+
+        # Resolve user from email
+        user = await self._db.users.find_one(
+            {"email": {"$regex": f"^{email}$", "$options": "i"}},
+            {"_id": 1}
+        )
+        if not user:
+            return self.error(f"No account found for email: {email}")
+
+        # Fetch main order
+        order = await self._db.orders.find_one({"_id": oid})
+        if not order:
+            return self.error(f"No order found with ID {order_id}.")
+
+        # Verify ownership
+        if str(user["_id"]) != str(order.get("userId")):
+            return self.error("This order does not belong to the provided email.")
+
+        # Enrich with invoice
+        invoice = None
+        if order.get("invoiceId"):
+            try:
+                invoice = await self._db.invoices.find_one({"_id": ObjectId(order["invoiceId"])})
+            except Exception:
+                pass
+
+        # Check for return
+        return_doc = await self._db.returns.find_one({"orderId": oid})
+
+        # Build clean tracking response
+        tracking = {
+            "order_id": str(order["_id"]),
+            "status": order.get("status", "Unknown"),
+            "created_at": order.get("createdAt").isoformat() if isinstance(order.get("createdAt"), datetime) else str(order.get("createdAt")),
+            "estimated_warehouse_date": order.get("estimated_warehouse_date").isoformat() if isinstance(order.get("estimated_warehouse_date"), datetime) else None,
+            "estimated_shipped_date": order.get("estimated_shipped_date").isoformat() if isinstance(order.get("estimated_shipped_date"), datetime) else None,
+            "estimated_destination_date": order.get("estimated_destination_date").isoformat() if isinstance(order.get("estimated_destination_date"), datetime) else None,
+            "shipping_address": order.get("shipping_address", {}),
+            "products": [
+                {
+                    "name": p.get("name", "Unknown"),
+                    "quantity": p.get("quantity", 1)
+                } for p in order.get("products", [])
+            ],
+            "delivery_date_change_request": order.get("delivery_date_change_request"),
+            "invoice": {
+                "total_amount": invoice.get("totalAmount") if invoice else order.get("totalAmount"),
+                "status": invoice.get("status") if invoice else None,
+                "invoice_number": invoice.get("metadata", {}).get("erpDetails", {}).get("invoiceNumber") if invoice else None,
+            } if invoice or "totalAmount" in order else None,
+            "return_status": _serialize(return_doc) if return_doc else None,
+            "status_history": serialize_dates(order.get("status_history", []))
+        }
+
+        return self.success(serialize_dates({
+            "tracking": tracking,
+            "message": "Here is the complete tracking information for your order."
+        }))
+
+# ── 8. Get Invoice Details ──────────────────────────────────────────────────
+
+class GetInvoiceDetails(BaseTool):
+    def __init__(self, db: AsyncIOMotorDatabase):
+        self._db = db
+
+    @property
+    def name(self) -> str:
+        return "get_invoice_details"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Retrieve the complete invoice and payment details for **ONE specific order**. "
+            "Returns total amount paid, tax breakdown, due date, invoice number, "
+            "payment transaction details, and loyalty points earned from that order. "
+            "Use this tool when the customer asks about 'my invoice', 'total amount I paid', "
+            "'due date on invoice', 'payment method', or 'tax on my order'. "
+            "This tool returns data for only one order at a time. "
+            "If the customer has multiple orders, first use get_order_history to let them choose one."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "order_id": {
+                    "type": "string",
+                    "description": "The specific order ID for which invoice details are needed"
+                },
+                "email": {
+                    "type": "string",
+                    "description": "The customer's email address"
+                }
+            },
+            "required": ["order_id", "email"]
+        }
+
+    async def execute(self, **kwargs: Any) -> dict:
+        order_id = kwargs.get("order_id", "").strip()
+        email    = kwargs.get("email", "").strip().lower()
+
+        if not order_id:
+            return self.error("order_id is required.")
+        if not email:
+            return self.error("email is required.")
+
+        try:
+            # Resolve user from email
+            user = await self._db.users.find_one(
+                {"email": {"$regex": f"^{email}$", "$options": "i"}},
+                {"_id": 1}
+            )
+            if not user:
+                return self.error(f"No account found for email: {email}")
+
+            # Fetch order and verify ownership
+            order = await self._db.orders.find_one({"_id": ObjectId(order_id)})
+            if not order:
+                return self.error(f"No order found with ID {order_id}")
+
+            if str(user["_id"]) != str(order.get("userId")):
+                return self.error("This order does not belong to the provided email.")
+
+            # Fetch invoice via invoiceId on the order
+            invoice = None
+            if order.get("invoiceId"):
+                invoice = await self._db.invoices.find_one({"_id": ObjectId(order["invoiceId"])})
+
+            if not invoice:
+                return self.error("No invoice found for this order.")
+
+            # Extract relevant fields
+            erp     = invoice.get("metadata", {}).get("erpDetails", {})
+            card    = invoice.get("metadata", {}).get("creditCardProcessing", {})
+            loyalty = invoice.get("metadata", {}).get("loyaltyRewards", {})
+
+            data = {
+                "invoice_id":             str(invoice.get("_id")),
+                "order_id":               order_id,
+                "invoice_number":         erp.get("invoiceNumber"),
+                "status":                 invoice.get("status"),
+                "total_amount":           invoice.get("totalAmount"),
+                "subtotal":               erp.get("subtotal"),
+                "total_tax":              erp.get("totalTax"),
+                "due_date":               erp.get("dueDate"),
+                "payment_terms":          erp.get("paymentTerms"),
+                "transaction_id":         card.get("transactionId"),
+                "approval_code":          card.get("approvalCode"),
+                "loyalty_points_earned":  loyalty.get("pointsEarned"),
+                "loyalty_tier":           loyalty.get("tier"),
+            }
+
+            return self.success({
+                "invoice": data,
+                "message": "Here are the invoice and payment details for your order."
+            })
+
+        except Exception as e:
+            logger.exception("get_invoice_details failed")
+            return self.error(f"Failed to fetch invoice details: {str(e)}")
+
+# ── 9. Get Total Amount Paid ──────────────────────────────────────────────────
+
+class GetTotalAmountPaid(BaseTool):
+    def __init__(self, db: AsyncIOMotorDatabase):
+        self._db = db
+
+    @property
+    def name(self) -> str:
+        return "get_total_amount_paid"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Calculate the customer's TOTAL lifetime spending across ALL orders. "
+            "Returns grand total paid, number of orders, average order value, "
+            "highest and lowest order amount, and purchase date range. "
+            "Use this when the customer asks 'how much have I spent in total', "
+            "'what is my total purchase amount', or 'how much money have I paid overall'. "
+            "This tool aggregates data from ALL orders, not just one."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "The customer's email address"
+                }
+            },
+            "required": ["email"]
+        }
+
+    async def execute(self, **kwargs: Any) -> dict:
+        email = kwargs.get("email", "").strip().lower()
+        if not email:
+            return self.error("email is required.")
+
+        try:
+            user = await self._db.users.find_one(
+                {"email": {"$regex": f"^{email}$", "$options": "i"}},
+                {"_id": 1}
+            )
+            if not user:
+                return self.error(f"No account found for email: {email}")
+
+            user_id = user["_id"]
+
+            pipeline = [
+                {"$match": {"userId": user_id}},
+                {
+                    "$addFields": {
+                        "createdAt": {
+                            "$cond": {
+                                "if": {"$eq": [{"$type": "$createdAt"}, "string"]},
+                                "then": {"$toDate": "$createdAt"},
+                                "else": "$createdAt"
+                            }
+                        }
+                    }
+                },
+                {
+                    "$lookup": {
+                        "from": "invoices",
+                        "localField": "_id",
+                        "foreignField": "orderId",
+                        "as": "invoice"
+                    }
+                },
+                {
+                    "$unwind": {
+                        "path": "$invoice",
+                        "preserveNullAndEmptyArrays": True
+                    }
+                },
+                {
+                    "$addFields": {
+                        "totalAmount": {
+                            "$ifNull": ["$invoice.totalAmount", 0]
+                        }
+                    }
+                },
+                {
+                    "$addFields": {
+                        "totalAmount": {
+                            "$cond": {
+                                "if": {"$isNumber": "$totalAmount"},
+                                "then": "$totalAmount",
+                                "else": 0
+                            }
+                        }
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": None,
+                        "total_amount_paid": {"$sum": "$totalAmount"},
+                        "total_orders":      {"$sum": 1},
+                        "highest_order":     {"$max": "$totalAmount"},
+                        "lowest_order":      {"$min": "$totalAmount"},
+                        "first_purchase":    {"$min": "$createdAt"},
+                        "last_purchase":     {"$max": "$createdAt"}
+                    }
+                }
+            ]
+
+            result = await self._db.orders.aggregate(pipeline).to_list(length=1)
+
+            if not result or not result[0].get("total_orders"):
+                return self.success({
+                    "total_amount_paid": 0,
+                    "total_orders": 0,
+                    "message": "You haven't made any purchases yet."
+                })
+
+            stats   = result[0]
+            average = round(stats["total_amount_paid"] / stats["total_orders"], 2) if stats["total_orders"] > 0 else 0
+
+            data = {
+                "total_amount_paid":     stats["total_amount_paid"],
+                "total_orders":          stats["total_orders"],
+                "average_order_value":   average,
+                "highest_order_amount":  stats.get("highest_order", 0),
+                "lowest_order_amount":   stats.get("lowest_order", 0),
+                "first_purchase_date":   stats.get("first_purchase").isoformat() if isinstance(stats.get("first_purchase"), datetime) else None,
+                "last_purchase_date":    stats.get("last_purchase").isoformat() if isinstance(stats.get("last_purchase"), datetime) else None,
+            }
+
+            return self.success({
+                "spending_summary": data,
+                "message": "Here is your complete spending summary across all purchases."
+            })
+
+        except Exception as e:
+            logger.exception("get_total_amount_paid failed")
+            return self.error(f"Failed to calculate total spending: {str(e)}")
 
 # ── Registry ────────────────────────────────────────────────────────────────────
 
@@ -657,4 +1016,7 @@ def get_all_tools(db: AsyncIOMotorDatabase) -> list[BaseTool]:
         GetReturnStatus(db),
         ChangeDeliveryDate(db),
         ChangeDeliveryAddress(db),
+        GetOrderTracking(db),
+        GetInvoiceDetails(db),
+        GetTotalAmountPaid(db),
     ]
