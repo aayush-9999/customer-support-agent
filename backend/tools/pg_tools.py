@@ -623,13 +623,360 @@ class ChangeDeliveryDatePG(BaseTool):
             return self.error(f"Failed to process date change request: {str(e)}")
  
  
-# ── Registry ────────────────────────────────────────────────────────────────────
+class GetPaymentInfoPG(BaseTool):
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
  
+    @property
+    def name(self) -> str:
+        return "get_payment_info"
+ 
+    @property
+    def description(self) -> str:
+        return (
+            "Retrieve full payment details for an order. "
+            "Returns payment method(s), total paid, instalment breakdown, "
+            "and each payment transaction line. "
+            "If no order_id is given, automatically uses the customer's most recent order — "
+            "this is the DEFAULT behaviour when a customer asks about 'my payment', "
+            "'how did I pay', 'payment method', 'how much did I pay', or 'my receipt'. "
+            "Only ask the customer to specify an order if they have already seen a list "
+            "from get_order_history and explicitly want a different order's payment info."
+        )
+ 
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "Customer's email address."
+                },
+                "order_id": {
+                    "type": "string",
+                    "description": (
+                        "Specific order ID to look up. "
+                        "OMIT this field to automatically use the customer's latest order."
+                    )
+                }
+            },
+            "required": ["email"]
+        }
+ 
+    async def execute(self, **kwargs: Any) -> dict:
+        email    = kwargs.get("email", "").strip().lower()
+        order_id = kwargs.get("order_id", "").strip() or None
+ 
+        if not email:
+            return self.error("email is required.")
+ 
+        try:
+            async with self._session_factory() as session:
+ 
+                # ── 1. Verify user account exists ────────────────────────
+                user_row = await session.execute(
+                    text("SELECT id FROM users WHERE LOWER(email) = :email"),
+                    {"email": email}
+                )
+                if not user_row.mappings().first():
+                    return self.error(f"No account found for email: {email}")
+ 
+                # ── 2. Resolve customer_id (order data lives here) ───────
+                cust_row = await session.execute(
+                    text("SELECT customer_id FROM customers WHERE LOWER(email) = :email"),
+                    {"email": email}
+                )
+                customer = cust_row.mappings().first()
+                if not customer:
+                    return self.error("No order history found for this account.")
+ 
+                customer_id = customer["customer_id"]
+ 
+                # ── 3. Resolve order_id — default to latest ──────────────
+                is_latest = False
+                if not order_id:
+                    latest_row = await session.execute(
+                        text("""
+                            SELECT order_id
+                            FROM   orders
+                            WHERE  customer_id = :customer_id
+                            ORDER  BY order_purchase_timestamp DESC
+                            LIMIT  1
+                        """),
+                        {"customer_id": customer_id}
+                    )
+                    latest = latest_row.mappings().first()
+                    if not latest:
+                        return self.error("No orders found for this account.")
+                    order_id  = latest["order_id"]
+                    is_latest = True
+ 
+                # ── 4. Ownership check + basic order info ────────────────
+                order_row = await session.execute(
+                    text("""
+                        SELECT
+                            order_id,
+                            order_status,
+                            order_purchase_timestamp,
+                            order_estimated_delivery_date
+                        FROM  orders
+                        WHERE order_id    = :order_id
+                          AND customer_id = :customer_id
+                        LIMIT 1
+                    """),
+                    {"order_id": order_id, "customer_id": customer_id}
+                )
+                order = order_row.mappings().first()
+                if not order:
+                    return self.error(
+                        f"No order found with ID '{order_id}' for this account."
+                    )
+ 
+                # ── 5. Fetch all payment rows for the order ───────────────
+                pay_rows = await session.execute(
+                    text("""
+                        SELECT
+                            payment_type,
+                            payment_value
+                        FROM  order_payments
+                        WHERE order_id = :order_id
+                    """),
+                    {"order_id": order_id}
+                )
+                payments = pay_rows.mappings().all()
+ 
+                if not payments:
+                    return self.error(
+                        f"No payment records found for order '{order_id}'."
+                    )
+ 
+                # ── 6. Aggregate summary ─────────────────────────────────
+                total_paid    = sum(float(p["payment_value"]) for p in payments)
+                payment_types = list({p["payment_type"] for p in payments})
+ 
+                # Per-method subtotals
+                method_totals: dict[str, float] = {}
+                for p in payments:
+                    ptype = p["payment_type"]
+                    method_totals[ptype] = round(
+                        method_totals.get(ptype, 0.0) + float(p["payment_value"]), 2
+                    )
+ 
+                breakdown = [
+                    {
+                        "method": p["payment_type"],
+                        "amount": round(float(p["payment_value"]), 2),
+                    }
+                    for p in payments
+                ]
+ 
+                return self.success({
+                    "order_id":        order_id,
+                    "is_latest_order": is_latest,
+                    "order_status":    order["order_status"],
+                    "ordered_at":      str(order["order_purchase_timestamp"])
+                                       if order["order_purchase_timestamp"] else None,
+                    "estimated_delivery": str(order["order_estimated_delivery_date"])
+                                          if order["order_estimated_delivery_date"] else None,
+                    # ── Payment summary ──────────────────────────────────
+                    "total_paid":      round(total_paid, 2),
+                    "payment_methods": payment_types,   # e.g. ["credit_card", "voucher"]
+                    "method_totals":   method_totals,   # e.g. {"credit_card": 120.0}
+                    "transactions":    breakdown,        # full line-by-line
+                    "message": (
+                        "Here are the payment details for your "
+                        + ("most recent order." if is_latest else f"order {order_id}.")
+                    ),
+                })
+ 
+        except Exception as e:
+            logger.exception(
+                f"get_payment_info failed for email={email}, order_id={order_id}"
+            )
+            return self.error(f"Failed to retrieve payment info: {str(e)}")
+ 
+
+class GetPaymentInfoPG(BaseTool):
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+ 
+    @property
+    def name(self) -> str:
+        return "get_payment_info"
+ 
+    @property
+    def description(self) -> str:
+        return (
+            "Retrieve full payment details for an order. "
+            "Returns payment method(s), total paid, instalment breakdown, "
+            "and each payment transaction line. "
+            "If no order_id is given, automatically uses the customer's most recent order — "
+            "this is the DEFAULT behaviour when a customer asks about 'my payment', "
+            "'how did I pay', 'payment method', 'how much did I pay', or 'my receipt'. "
+            "Only ask the customer to specify an order if they have already seen a list "
+            "from get_order_history and explicitly want a different order's payment info."
+        )
+ 
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "Customer's email address."
+                },
+                "order_id": {
+                    "type": "string",
+                    "description": (
+                        "Specific order ID to look up. "
+                        "OMIT this field to automatically use the customer's latest order."
+                    )
+                }
+            },
+            "required": ["email"]
+        }
+ 
+    async def execute(self, **kwargs: Any) -> dict:
+        email    = kwargs.get("email", "").strip().lower()
+        order_id = kwargs.get("order_id", "").strip() or None
+ 
+        if not email:
+            return self.error("email is required.")
+ 
+        try:
+            async with self._session_factory() as session:
+ 
+                # ── 1. Verify user account exists ────────────────────────
+                user_row = await session.execute(
+                    text("SELECT id FROM users WHERE LOWER(email) = :email"),
+                    {"email": email}
+                )
+                if not user_row.mappings().first():
+                    return self.error(f"No account found for email: {email}")
+ 
+                # ── 2. Resolve customer_id (order data lives here) ───────
+                cust_row = await session.execute(
+                    text("SELECT customer_id FROM customers WHERE LOWER(email) = :email"),
+                    {"email": email}
+                )
+                customer = cust_row.mappings().first()
+                if not customer:
+                    return self.error("No order history found for this account.")
+ 
+                customer_id = customer["customer_id"]
+ 
+                # ── 3. Resolve order_id — default to latest ──────────────
+                is_latest = False
+                if not order_id:
+                    latest_row = await session.execute(
+                        text("""
+                            SELECT order_id
+                            FROM   orders
+                            WHERE  customer_id = :customer_id
+                            ORDER  BY order_purchase_timestamp DESC
+                            LIMIT  1
+                        """),
+                        {"customer_id": customer_id}
+                    )
+                    latest = latest_row.mappings().first()
+                    if not latest:
+                        return self.error("No orders found for this account.")
+                    order_id  = latest["order_id"]
+                    is_latest = True
+ 
+                # ── 4. Ownership check + basic order info ────────────────
+                order_row = await session.execute(
+                    text("""
+                        SELECT
+                            order_id,
+                            order_status,
+                            order_purchase_timestamp,
+                            order_estimated_delivery_date
+                        FROM  orders
+                        WHERE order_id    = :order_id
+                          AND customer_id = :customer_id
+                        LIMIT 1
+                    """),
+                    {"order_id": order_id, "customer_id": customer_id}
+                )
+                order = order_row.mappings().first()
+                if not order:
+                    return self.error(
+                        f"No order found with ID '{order_id}' for this account."
+                    )
+ 
+                # ── 5. Fetch all payment rows for the order ───────────────
+                pay_rows = await session.execute(
+                    text("""
+                        SELECT
+                            payment_type,
+                            payment_value
+                        FROM  order_payments
+                        WHERE order_id = :order_id
+                    """),
+                    {"order_id": order_id}
+                )
+                payments = pay_rows.mappings().all()
+ 
+                if not payments:
+                    return self.error(
+                        f"No payment records found for order '{order_id}'."
+                    )
+ 
+                # ── 6. Aggregate summary ─────────────────────────────────
+                total_paid    = sum(float(p["payment_value"]) for p in payments)
+                payment_types = list({p["payment_type"] for p in payments})
+ 
+                # Per-method subtotals
+                method_totals: dict[str, float] = {}
+                for p in payments:
+                    ptype = p["payment_type"]
+                    method_totals[ptype] = round(
+                        method_totals.get(ptype, 0.0) + float(p["payment_value"]), 2
+                    )
+ 
+                breakdown = [
+                    {
+                        "method": p["payment_type"],
+                        "amount": round(float(p["payment_value"]), 2),
+                    }
+                    for p in payments
+                ]
+ 
+                return self.success({
+                    "order_id":        order_id,
+                    "is_latest_order": is_latest,
+                    "order_status":    order["order_status"],
+                    "ordered_at":      str(order["order_purchase_timestamp"])
+                                       if order["order_purchase_timestamp"] else None,
+                    "estimated_delivery": str(order["order_estimated_delivery_date"])
+                                          if order["order_estimated_delivery_date"] else None,
+                    # ── Payment summary ──────────────────────────────────
+                    "total_paid":      round(total_paid, 2),
+                    "payment_methods": payment_types,   # e.g. ["credit_card", "voucher"]
+                    "method_totals":   method_totals,   # e.g. {"credit_card": 120.0}
+                    "transactions":    breakdown,        # full line-by-line
+                    "message": (
+                        "Here are the payment details for your "
+                        + ("most recent order." if is_latest else f"order {order_id}.")
+                    ),
+                })
+ 
+        except Exception as e:
+            logger.exception(
+                f"get_payment_info failed for email={email}, order_id={order_id}"
+            )
+            return self.error(f"Failed to retrieve payment info: {str(e)}")
+ 
+
 def get_all_pg_tools(session_factory) -> list[BaseTool]:
     return [
         GetOrderHistoryPG(session_factory),
         GetOrderDetailsPG(session_factory),
         GetOrderStatusPG(session_factory),
         ChangeDeliveryDatePG(session_factory),
+        GetPaymentInfoPG(session_factory),
     ]
  
