@@ -1,96 +1,37 @@
-# Leafy Payment & Pricing Policy
+# Payment & Pricing Policy — Rules
 
 ## Accepted Payment Methods
+Visa / Mastercard / Amex / Discover | PayPal | Apple Pay / Google Pay | Store credit | Leafy Rewards points
+- Store credit combinable with any payment method
+- Points and promo codes cannot be combined (one per order, unless marked "combinable")
+- Bank transfer for refunds/returns only
+- No cryptocurrency, no cash on delivery
 
-| Method | Available |
-|---|---|
-| Visa / Mastercard / Amex / Discover | Yes |
-| PayPal | Yes |
-| Apple Pay / Google Pay | Yes |
-| Store Credit (Leafy balance) | Yes |
-| Leafy Rewards points (at checkout) | Yes |
-| Bank Transfer (direct) | Returns/refunds only |
-| Cryptocurrency | No |
-| Cash on Delivery | No |
-
-Customers may combine store credit with any other payment method at checkout.
-Points and promotional codes cannot be combined (one per order).
-
----
-
-## Pricing
-
-- All prices displayed in USD unless the customer has selected a local currency
-- Currency conversion is indicative — final charge is in USD at card network rate
-- Prices shown on product pages are inclusive of any applicable platform fee
-- Prices do not include shipping (calculated at checkout) or import duties (international)
-
-### Price Matching
-Leafy does not offer price matching with other retailers.
-
-### Price Adjustments
-If an item you purchased goes on sale within **48 hours** of your order date,
-contact support for a one-time price adjustment credit (issued as store credit).
-This applies once per order and is not available on Final Sale items.
-
----
-
-## Discounts & Promotional Codes
-
-- One promotional code per order
-- Codes cannot be applied retroactively to placed orders
-- Codes have individual expiry dates — check the promotion details
-- Leafy Rewards points can be used alongside promotional codes only in specific
-  campaigns (marked "combinable" in the promotion)
-
----
+## Pricing Rules
+- All prices in USD (local currency display is indicative — final charge in USD)
+- Prices exclude shipping and international import duties
+- No price matching with other retailers
+- Price adjustment: if item goes on sale within 48h of order, one-time store credit adjustment (not on Final Sale)
+- Promo codes cannot be applied retroactively
 
 ## Charging & Billing
-
-- Payment is captured at the time of order placement, not at shipment
-- If an item in a multi-item order is out of stock, only the shipped items are charged
-  and the remainder is refunded automatically within 3–5 business days
-- Leafy does not store full card numbers — payments are tokenised via our payment processor
-- CVV is never stored after authorisation
-
----
+- Payment captured at order placement, not at shipment
+- Multi-item order with out-of-stock item → only shipped items charged, remainder refunded in 3–5 business days
+- No full card numbers stored — payments tokenised. CVV never stored.
 
 ## Failed Payments
+1. Order held for 24 hours — customer receives payment retry link
+2. After 24h unresolved → order cancelled automatically, inventory released
+- Agent can confirm status but cannot process payments manually
 
-If a payment fails:
-1. The order is held for 24 hours
-2. Customer receives an email with a secure payment retry link
-3. After 24 hours without resolution, the order is automatically cancelled
-4. Any reserved inventory is released
+## Invoices & Taxes
+- Digital receipt emailed immediately after purchase
+- Full invoices (with VAT) available in account settings. Agent can resend using order ID.
+- US: sales tax calculated at checkout based on shipping address
+- EU: VAT included in displayed price
+- Other regions: import tax is customer's responsibility
 
-The agent can confirm order status but cannot manually process payments.
-
----
-
-## Invoices & Receipts
-
-- A digital receipt is emailed immediately after purchase
-- Full invoices (with VAT breakdowns for EU customers) are available in account settings
-- The agent can resend a receipt or invoice on request using the customer's order ID
-
----
-
-## Taxes
-
-- US orders: sales tax calculated based on shipping address, applied at checkout
-- EU orders: VAT included in displayed price where applicable
-- All other regions: tax is the customer's responsibility (see customs policy)
-
----
-
-## Fraud & Security
-
-- Leafy's payment processor runs automated fraud checks on all transactions
-- Orders flagged for review may be delayed by 1–2 business days
-- Leafy may contact the customer to verify identity on high-value orders
-- Repeated failed payment attempts may result in temporary account hold
-
----
-
-*Leafy uses industry-standard PCI-DSS compliant payment processing.
-No full card data is stored on Leafy systems.*
+## Fraud
+- Automated fraud checks on all transactions. Flagged orders may delay 1–2 business days.
+- High-value orders may require identity verification contact
+- Repeated failed payment attempts → temporary account hold

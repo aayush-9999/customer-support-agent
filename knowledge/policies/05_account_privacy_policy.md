@@ -1,128 +1,38 @@
-# Leafy Account & Privacy Policy
+# Account & Privacy Policy — Rules
 
-## Account Types
+## Account Status
 
-Every Leafy customer has a single registered account. Account status is one of:
+| Status | Can Place Orders | Can Initiate Returns | Agent Action |
+|---|---|---|---|
+| Active | Yes | Yes | Standard support |
+| Suspended | No | No | Explain reason + direct to appeals |
+| Banned | No | No | Cannot process orders or returns |
 
-| Status | Meaning | Agent Action |
-|---|---|---|
-| Active | Normal — full access | Standard support |
-| Suspended | Temporary restriction | Explain reason, direct to appeals |
-| Banned | Permanent restriction | Cannot process orders/returns |
+Suspended: existing orders in transit are still fulfilled.
 
-Suspended accounts cannot place new orders or initiate returns. Existing orders
-in transit will still be fulfilled.
+## What Agents Can / Cannot Access
 
----
+Can see: name, email, phone, order history, return history, loyalty points/tier, account status, saved addresses
+Cannot see: full card number (last 4 only), password, security questions, 2FA/recovery codes
 
-## Account Creation
+## Account Rules
+- One account per person per email address. Minimum age: 18.
+- Duplicate accounts may be merged or the secondary suspended.
+- Account creation: free, required to order, earns 50 bonus points.
 
-- One account per person / per email address
-- Minimum age: 18 years (or the legal age of majority in your country)
-- Account creation is free and required to place an order
-- Customers earn 50 points on account creation (Leafy Rewards)
+## Suspension Triggers
+Suspected payment fraud | Chargeback without contacting support first | Returning 80%+ of orders over 3+ months | Terms violation
 
----
+## Ban Triggers
+Confirmed fraud | Return policy abuse after warnings | Harassment of support staff | Multiple fraudulent chargebacks
 
-## Account Security
+## Appeals Process
+Email subject: "Account Appeal — [order ID or email]" → support@leafy.store
+- Suspension appeals reviewed within 5 business days
+- Banned accounts may appeal once — decision after appeal is final
 
-- Passwords must be at least 10 characters with mixed case and a number
-- Two-factor authentication (2FA) is available and recommended
-- Leafy support agents can never see your password — only account status and profile data
-- If you suspect unauthorised access, contact support immediately for an account lock
-
-### What Agents Can See
-Support agents have access to:
-- Name, email address, phone number
-- Order history and order details
-- Return history and return status
-- Loyalty points balance and tier
-- Account status (active/suspended/banned)
-- Saved shipping addresses
-
-Support agents **cannot** see:
-- Payment card numbers (only last 4 digits)
-- Password or security questions
-- 2FA codes or recovery codes
-
----
-
-## Personal Data We Collect
-
-| Data Type | Why We Collect It |
-|---|---|
-| Name, email, phone | Account management and order communication |
-| Shipping addresses | Order fulfilment |
-| Order and purchase history | Support, returns, loyalty points |
-| Device and browsing data | Site performance and fraud prevention |
-| Communications with support | Quality assurance and dispute resolution |
-
----
-
-## How We Use Your Data
-
-- To fulfil and communicate about orders
-- To manage returns and refunds
-- To run the Leafy Rewards loyalty program
-- To send marketing emails (only with explicit opt-in)
-- To detect and prevent fraud
-
-We do **not** sell personal data to third parties.
-We share data with service providers (payment processors, shipping carriers, cloud
-infrastructure) only as necessary to operate the business.
-
----
-
-## Marketing Communications
-
-- Marketing emails are opt-in only
-- Customers can unsubscribe at any time via the link in any email or via account settings
-- Unsubscribing from marketing does not affect transactional emails (order confirmations,
-  shipping updates, return notifications)
-
----
-
-## Data Retention
-
-- Active accounts: data retained for the duration of account + 3 years
-- Deleted accounts: personal data anonymised within 30 days, order records kept 7 years
-  for legal/tax compliance
-- Support chat logs: retained for 2 years
-
----
-
-## Your Rights
-
-Customers may request:
-- A copy of all personal data held (data export)
-- Correction of inaccurate data
-- Deletion of their account and associated data (right to erasure)
-- Restriction of processing in specific circumstances
-
-To exercise these rights, contact support@leafy.store. Requests are processed within
-30 days. Identity verification is required before data is shared or deleted.
-
----
-
-## Account Suspension & Ban Policy
-
-### Suspension Triggers
-- Suspected payment fraud
-- Chargebacks filed without contacting support first
-- Unusual return patterns (e.g. returning more than 80% of orders over 3+ months)
-- Violation of purchase terms
-
-### Ban Triggers
-- Confirmed fraudulent activity
-- Abuse of return policy (serial returners after warnings)
-- Harassment of support staff
-- Multiple fraudulent chargeback attempts
-
-### Appeals
-Suspended customers may appeal by emailing support@leafy.store with subject line
-"Account Appeal — [order ID or account email]". Appeals are reviewed within 5 business days.
-Banned accounts may appeal once; the decision after appeal is final.
-
----
-
-*Leafy is committed to responsible data handling. This policy is reviewed annually.*
+## Data Rights (customer requests)
+All handled via email to support@leafy.store — agents cannot action these from chat:
+- Data export: processed within 30 days, identity verification required
+- Account deletion: personal data anonymised within 30 days, order records retained 7 years
+- Data correction or processing restriction: email with details

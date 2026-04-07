@@ -9,6 +9,10 @@ from backend.core.config import get_settings
 logger   = logging.getLogger(__name__)
 settings = get_settings()
 
+# Rough token estimation: 1 token ≈ 4 characters (good enough for logging)
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(text) // 4)
+
 
 class FilePolicyStore:
     """
@@ -16,20 +20,23 @@ class FilePolicyStore:
 
     On init:
         - Reads manifest.json
-        - Loads always_load files immediately (they're in every prompt)
+        - Loads always_load files (cached in memory — in every prompt)
 
     On build_context(user_message):
         - Scores on_topic files against user message keywords
         - Returns top 3 matches + always_load as one combined string
+        - Logs estimated token counts so you can track context size
     """
 
     def __init__(self):
         self._base     = Path(settings.knowledge_base_dir)
         self._manifest = self._load_manifest()
         self._always   = self._load_always_files()
+
+        always_tokens = sum(_estimate_tokens(c) for c in self._always)
         logger.info(
             f"FilePolicyStore ready — "
-            f"{len(self._always)} always-load files, "
+            f"{len(self._always)} always-load files (~{always_tokens} tokens), "
             f"{len(self._manifest.get('on_topic', []))} on-topic files"
         )
 
@@ -38,16 +45,25 @@ class FilePolicyStore:
     def build_context(self, user_message: str) -> str:
         """
         Build the full knowledge context string for this user message.
-        Called once per request in the agent to build the system prompt.
+        Logs estimated token count for every section so you can see exactly
+        what's being injected into the prompt.
         """
-        on_topic = self._score_and_select(user_message)
-        sections = self._always + on_topic
+        on_topic_entries, on_topic_contents = self._score_and_select(user_message)
+        sections = self._always + on_topic_contents
+
+        # ── Token logging ────────────────────────────────────────────────────
+        always_tokens   = sum(_estimate_tokens(c) for c in self._always)
+        on_topic_tokens = sum(_estimate_tokens(c) for c in on_topic_contents)
+        total_tokens    = always_tokens + on_topic_tokens
+
+        logger.info(
+            f"[CONTEXT] Policy injection — "
+            f"always: ~{always_tokens} tokens | "
+            f"on-topic ({[e['file'] for e in on_topic_entries]}): ~{on_topic_tokens} tokens | "
+            f"total knowledge context: ~{total_tokens} tokens"
+        )
 
         context = "\n\n---\n\n".join(sections)
-        logger.debug(
-            f"Policy context built — "
-            f"{len(self._always)} always + {len(on_topic)} on-topic files"
-        )
         return context
 
     # ── Private ────────────────────────────────────────────────────────────────
@@ -66,16 +82,19 @@ class FilePolicyStore:
         for entry in self._manifest.get("always_load", []):
             content = self._read_file(entry["file"])
             if content:
+                token_est = _estimate_tokens(content)
+                logger.debug(f"Always-load: {entry['file']} (~{token_est} tokens)")
                 contents.append(content)
         return contents
 
-    def _score_and_select(self, user_message: str, top_n: int = 3) -> list[str]:
+    def _score_and_select(
+        self,
+        user_message: str,
+        top_n: int = 3,
+    ) -> tuple[list[dict], list[str]]:
         """
-        Score each on_topic file against the user message.
-        Score = number of keywords from the file's keyword list
-                that appear in the lowercased user message.
-        Returns content of top_n files with score > 0,
-        ordered by (score desc, priority asc).
+        Score each on_topic file against the user message keywords.
+        Returns (matched_entries, matched_contents).
         Falls back to fallback files if nothing matches.
         """
         message_lower = user_message.lower()
@@ -87,15 +106,14 @@ class FilePolicyStore:
             if score > 0:
                 scored.append((score, entry.get("priority", 99), entry))
 
-        # Sort: highest score first, then lowest priority number first
         scored.sort(key=lambda x: (-x[0], x[1]))
-        top = [entry for _, _, entry in scored[:top_n]]
+        top_entries = [entry for _, _, entry in scored[:top_n]]
 
-        # Fallback if nothing matched
-        if not top:
-            top = self._get_fallback_entries()
+        if not top_entries:
+            top_entries = self._get_fallback_entries()
 
-        return [c for c in (self._read_file(e["file"]) for e in top) if c]
+        contents = [c for c in (self._read_file(e["file"]) for e in top_entries) if c]
+        return top_entries, contents
 
     def _get_fallback_entries(self) -> list[dict]:
         fallback_files = self._manifest.get("fallback_if_no_topic_match", [])
