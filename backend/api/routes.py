@@ -21,7 +21,6 @@ from backend.tools.base import BaseTool
 from backend.database import get_db
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
-from backend.tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -103,8 +102,11 @@ async def chat(
 
         # Link the pending_request to this session if a date-change was made.
         # (Allows admin approval to push a WebSocket notification to the right customer.)
+        # REPLACE WITH
+        TOOLS_NEEDING_SESSION = {"change_delivery_date", "initiate_return"}
+
         if db is not None and any(
-            tc.tool_name == "change_delivery_date" for tc in response.tool_calls
+            tc.tool_name in TOOLS_NEEDING_SESSION for tc in response.tool_calls
         ):
             from pymongo import DESCENDING
             await db.pending_requests.find_one_and_update(

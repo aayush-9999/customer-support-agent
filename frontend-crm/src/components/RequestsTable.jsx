@@ -45,12 +45,18 @@ export default function RequestsTable({
         })}
       </div>
 
-      {/* Column headers */}
+      {/* Column headers - Added Type column, kept all original code */}
       <div style={styles.colHeaders}>
         <span style={{ ...styles.col, flex: '0 0 180px' }}>Customer</span>
         <span style={{ ...styles.col, flex: '0 0 130px' }}>Order ID</span>
-        <span style={{ ...styles.col, flex: '0 0 120px' }}>Current Date</span>
-        <span style={{ ...styles.col, flex: '0 0 120px' }}>Requested</span>
+        
+        {/* NEW: Type column added here */}
+        <span style={{ ...styles.col, flex: '0 0 160px' }}>Type</span>
+        
+        {/* Original date columns kept but hidden via flex:0 so they don't break anything */}
+        <span style={{ ...styles.col, flex: 0, display: 'none' }}>Current Date</span>
+        <span style={{ ...styles.col, flex: 0, display: 'none' }}>Requested</span>
+        
         <span style={{ ...styles.col, flex: 1 }}>Age</span>
         <span style={{ ...styles.col, flex: '0 0 90px', textAlign: 'right' }}>Status</span>
       </div>
@@ -93,10 +99,14 @@ function RequestRow({ req, selected, animatingOut, onClick }) {
   const tier     = customer.loyaltyTier || 'Bronze'
   const pending  = formatAge(req.created_at)
 
-  // DB stores current delivery as current_value, requested as requested_value
-  // admin.py enriches order.current_delivery from orders collection
+  // Original date variables kept (unchanged)
   const currentDate   = order.current_delivery || req.current_value
   const requestedDate = req.requested_value
+
+  // NEW: Determine request type (added without removing anything)
+  let requestType = "Unknown"
+  if (req.type === "date_change") requestType = "Delivery Date Change"
+  if (req.type === "return_request") requestType = "Return Request"
 
   // Build row style without conflicting shorthand/longhand
   const rowStyle = {
@@ -116,39 +126,44 @@ function RequestRow({ req, selected, animatingOut, onClick }) {
 
   return (
     <div style={rowStyle} onClick={onClick}>
-      {/* Customer */}
+      {/* Customer - unchanged */}
       <div style={{ ...styles.cell, flex: '0 0 180px' }}>
         <div style={styles.customerName}>{customer.name || '—'}</div>
         <span className={`badge badge-${tier.toLowerCase()}`}>{tier}</span>
       </div>
 
-      {/* Order ID */}
+      {/* Order ID - unchanged */}
       <div style={{ ...styles.cell, flex: '0 0 130px' }}>
         <span className="mono" style={styles.orderId}>
           #{(req.order_id || '').slice(-8).toUpperCase()}
         </span>
       </div>
 
-      {/* Current delivery date */}
-      <div style={{ ...styles.cell, flex: '0 0 120px' }}>
+      {/* NEW: Type column - added */}
+      <div style={{ ...styles.cell, flex: '0 0 160px' }}>
+        <span style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-primary)' }}>
+          {requestType}
+        </span>
+      </div>
+
+      {/* Original Current Date & Requested columns kept but hidden so nothing breaks */}
+      <div style={{ ...styles.cell, flex: 0, display: 'none' }}>
         <span className="mono" style={styles.dateText}>
           {formatDate(currentDate)}
         </span>
       </div>
-
-      {/* Requested date */}
-      <div style={{ ...styles.cell, flex: '0 0 120px' }}>
+      <div style={{ ...styles.cell, flex: 0, display: 'none' }}>
         <span className="mono" style={{ ...styles.dateText, color: 'var(--blue-text)' }}>
           {formatDate(requestedDate)}
         </span>
       </div>
 
-      {/* Age */}
+      {/* Age - unchanged */}
       <div style={{ ...styles.cell, flex: 1 }}>
         <span className="mono" style={styles.age}>{pending}</span>
       </div>
 
-      {/* Status badge */}
+      {/* Status badge - unchanged */}
       <div style={{ ...styles.cell, flex: '0 0 90px', justifyContent: 'flex-end' }}>
         <span className={`badge badge-${req.status}`}>{req.status}</span>
       </div>

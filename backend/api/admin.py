@@ -1,5 +1,6 @@
 # backend/api/admin.py
 
+import uuid
 import logging
 from datetime import datetime, timezone
 from bson import ObjectId
@@ -88,9 +89,9 @@ async def get_pending_requests(
             )
             if user:
                 serialized["customer"] = {
-                    "name":         f"{user.get('name')} {user.get('surname')}",
-                    "email":        user.get("email"),
-                    "loyaltyTier":  user.get("loyaltyTier"),
+                    "name":        f"{user.get('name')} {user.get('surname')}",
+                    "email":       user.get("email"),
+                    "loyaltyTier": user.get("loyaltyTier"),
                 }
         except Exception:
             pass
@@ -102,13 +103,13 @@ async def get_pending_requests(
 
 @router.post("/requests/{request_id}/approve")
 async def approve_request(
-    request_id:   str,
-    body:         ResolutionBody = ResolutionBody(),
-    current_user: dict = Depends(get_current_admin),
-    db:           AsyncIOMotorDatabase = Depends(get_db),
+    request_id:    str,
+    body:          ResolutionBody = ResolutionBody(),
+    current_user:  dict = Depends(get_current_admin),
+    db:            AsyncIOMotorDatabase = Depends(get_db),
     conversations: ConversationStore = Depends(get_conversations),
 ):
-    """Approve a pending request — updates DB and mirrors status to order."""
+    """Approve a pending request — handles date_change and return_request types."""
     try:
         rid = ObjectId(request_id)
     except Exception:
@@ -123,9 +124,10 @@ async def approve_request(
             detail=f"Request is already '{req['status']}'."
         )
 
-    now = datetime.now(timezone.utc)
+    now      = datetime.now(timezone.utc)
+    order_id = req["order_id"]
 
-    # Update pending_requests
+    # ── Mark pending_request as approved (same for all types) ─────────────────
     await db.pending_requests.update_one(
         {"_id": rid},
         {"$set": {
@@ -136,35 +138,78 @@ async def approve_request(
         }}
     )
 
-    # Mirror to order + apply the actual change
-    order_id = req["order_id"]
-    update_fields = {
-        "delivery_date_change_request.status":      "approved",
-        "delivery_date_change_request.resolved_at": now,
-    }
+    # ── Type-specific logic ────────────────────────────────────────────────────
 
     if req["type"] == "date_change":
-        update_fields["estimated_destination_date"] = req["requested_value"]
+        # Apply the new delivery date to the order — behaviour unchanged
+        await db.orders.update_one(
+            {"_id": order_id},
+            {"$set": {
+                "estimated_destination_date":               req["requested_value"],
+                "delivery_date_change_request.status":      "approved",
+                "delivery_date_change_request.resolved_at": now,
+            }}
+        )
 
-    await db.orders.update_one(
-        {"_id": order_id},
-        {"$set": update_fields}
-    )
+        approval_message = (
+            f"Great news! Your delivery date change request has been approved. "
+            f"Your new delivery date is "
+            f"{req['requested_value'].strftime('%B %d, %Y')}."
+        )
 
-    logger.info(
-        f"Request {request_id} approved by {current_user.get('email')}"
-    )
+    elif req["type"] == "return_request":
+        # Generate RMA number and create the returns document
+        rma_number = f"RMA-{str(uuid.uuid4()).upper()[:8]}"
 
-    approval_message = (
-        f"Great news! Your delivery date change request has been approved. "
-        f"Your new delivery date is "
-        f"{req['requested_value'].strftime('%B %d, %Y')}."
-    )
+        return_doc = {
+            "orderId":                    order_id,
+            "userId":                     req.get("user_id"),
+            "status":                     "Requested",
+            "rma_number":                 rma_number,
+            "reason":                     req.get("reason"),
+            "items":                      req.get("items", []),
+            "refund_method":              req.get("refund_method"),
+            "return_shipping_covered_by": req.get("return_shipping_covered_by"),
+            "created_at":                 req.get("created_at"),
+            "approved_at":                now,
+            "approved_by":                current_user.get("email"),
+            "resolved_at":                None,
+            "resolution_note":            body.note,
+        }
+        await db.returns.insert_one(return_doc)
 
+        # Mirror status + RMA back to order
+        await db.orders.update_one(
+            {"_id": order_id},
+            {"$set": {
+                "return_request.status":      "approved",
+                "return_request.rma_number":  rma_number,
+                "return_request.resolved_at": now,
+            }}
+        )
+
+        shipping_note = (
+            "Leafy will email you a free return label."
+            if req.get("return_shipping_covered_by") == "leafy"
+            else "Return shipping is at your cost."
+        )
+        approval_message = (
+            f"Great news! Your return request has been approved. "
+            f"Your RMA number is {rma_number}. "
+            f"Please ship the item(s) back within 7 days. "
+            f"{shipping_note}"
+        )
+
+    else:
+        # Unknown type — still approved in pending_requests above, just log it
+        logger.warning(f"approve_request: unknown request type '{req.get('type')}'")
+        approval_message = "Your request has been approved."
+
+    logger.info(f"Request {request_id} approved by {current_user.get('email')}")
+
+    # ── Notify customer ────────────────────────────────────────────────────────
     session_id = str(req.get("session_id", ""))
 
-    # ── FIX: persist as a proper "notification" role, NOT a fake user/assistant pair.
-    # This means on history load it will be rendered as a banner pill, not a bubble.
     if session_id:
         await conversations.append_notification(
             session_id = session_id,
@@ -172,7 +217,6 @@ async def approve_request(
             status     = "approved",
         )
 
-    # Notify the customer's live session if they're currently online
     await ws_manager.notify_session(
         session_id = session_id,
         payload    = {
@@ -191,10 +235,10 @@ async def approve_request(
 
 @router.post("/requests/{request_id}/reject")
 async def reject_request(
-    request_id:   str,
-    body:         ResolutionBody = ResolutionBody(),
-    current_user: dict = Depends(get_current_admin),
-    db:           AsyncIOMotorDatabase = Depends(get_db),
+    request_id:    str,
+    body:          ResolutionBody = ResolutionBody(),
+    current_user:  dict = Depends(get_current_admin),
+    db:            AsyncIOMotorDatabase = Depends(get_db),
     conversations: ConversationStore = Depends(get_conversations),
 ):
     try:
@@ -211,8 +255,10 @@ async def reject_request(
             detail=f"Request is already '{req['status']}'."
         )
 
-    now = datetime.now(timezone.utc)
+    now      = datetime.now(timezone.utc)
+    order_id = req["order_id"]
 
+    # ── Mark pending_request as rejected (same for all types) ─────────────────
     await db.pending_requests.update_one(
         {"_id": rid},
         {"$set": {
@@ -223,27 +269,52 @@ async def reject_request(
         }}
     )
 
-    await db.orders.update_one(
-        {"_id": req["order_id"]},
-        {"$set": {
-            "delivery_date_change_request.status":          "rejected",
-            "delivery_date_change_request.resolved_at":    now,
-            "delivery_date_change_request.resolution_note": body.note,
-        }}
-    )
+    # ── Type-specific logic ────────────────────────────────────────────────────
 
-    logger.info(
-        f"Request {request_id} rejected by {current_user.get('email')}"
-    )
+    if req["type"] == "date_change":
+        # Mirror rejection back to order — behaviour unchanged
+        await db.orders.update_one(
+            {"_id": order_id},
+            {"$set": {
+                "delivery_date_change_request.status":           "rejected",
+                "delivery_date_change_request.resolved_at":      now,
+                "delivery_date_change_request.resolution_note":  body.note,
+            }}
+        )
 
-    rejection_message = (
-        "Unfortunately your delivery date change request could not be approved. "
-        f"Reason: {body.note or 'No reason provided'}."
-    )
+        rejection_message = (
+            "Unfortunately your delivery date change request could not be approved. "
+            f"Reason: {body.note or 'No reason provided'}."
+        )
 
+    elif req["type"] == "return_request":
+        # Mirror rejection back to order
+        await db.orders.update_one(
+            {"_id": order_id},
+            {"$set": {
+                "return_request.status":           "rejected",
+                "return_request.resolved_at":      now,
+                "return_request.resolution_note":  body.note,
+            }}
+        )
+
+        rejection_message = (
+            "Unfortunately your return request could not be approved. "
+            f"Reason: {body.note or 'No reason provided'}."
+        )
+
+    else:
+        logger.warning(f"reject_request: unknown request type '{req.get('type')}'")
+        rejection_message = (
+            "Unfortunately your request could not be approved. "
+            f"Reason: {body.note or 'No reason provided'}."
+        )
+
+    logger.info(f"Request {request_id} rejected by {current_user.get('email')}")
+
+    # ── Notify customer ────────────────────────────────────────────────────────
     session_id = str(req.get("session_id", ""))
 
-    # ── FIX: persist as a proper "notification" role, NOT a fake user/assistant pair.
     if session_id:
         await conversations.append_notification(
             session_id = session_id,

@@ -59,6 +59,22 @@ promise delivery dates beyond what the data shows.
 
 ══ KNOWLEDGE CONTEXT ══
 {knowledge_context}
+
+══ TOOL CALLING RULES (STRICT) ══
+You MUST use the provided tool calling interface when a tool is required.
+
+CRITICAL:
+- ALWAYS return tool calls using the structured tool_calls format
+- NEVER return function calls in plain text
+- NEVER use formats like <function>...</function>
+- NEVER simulate or describe a tool call in text
+- DO NOT include explanations when calling a tool
+
+If a tool is needed:
+→ Call the tool directly using tool_calls
+→ Do NOT generate a normal text response
+
+If you fail to follow this format, the response is invalid.
 """.strip()
 
 
