@@ -199,6 +199,61 @@ async def approve_request(
             f"Please ship the item(s) back within 7 days. "
             f"{shipping_note}"
         )
+    
+    elif req["type"] == "item_change":
+ 
+        item_name   = req.get("item_name", "Unknown item")
+        new_size    = req.get("new_size", "")
+        new_color   = req.get("new_color", "")
+        old_size    = req.get("old_size", "")
+        old_color   = req.get("old_color", "")
+ 
+        # Build human-readable change description
+        change_parts = []
+        if new_size  and new_size  != old_size:
+            change_parts.append(f"size {old_size} → {new_size}")
+        if new_color and new_color != old_color:
+            change_parts.append(f"colour {old_color} → {new_color}")
+        change_description = ", ".join(change_parts) if change_parts else "no change"
+ 
+        # Fetch the order and apply the change to products array
+        order = await db.orders.find_one({"_id": order_id}, {"products": 1})
+        if order:
+            products = order.get("products", [])
+            for p in products:
+                if p.get("name", "").lower() == item_name.lower():
+                    if new_size:  p["size"]  = new_size
+                    if new_color: p["color"] = new_color
+                    break
+ 
+            await db.orders.update_one(
+                {"_id": order_id},
+                {
+                    "$set": {
+                        "products":                    products,
+                        "item_change_request.status":      "approved",
+                        "item_change_request.resolved_at": now,
+                    },
+                    "$push": {
+                        "status_history": {
+                            "status":     "Item Change Approved",
+                            "note": (
+                                f"Change approved for '{item_name}': "
+                                f"{change_description}. "
+                                f"Approved by {current_user.get('email')}."
+                                + (f" Note: {body.note}" if body.note else "")
+                            ),
+                            "timestamp":  now,
+                            "updated_by": current_user.get("email"),
+                        }
+                    }
+                }
+            )
+ 
+        approval_message = (
+            f"Great news! Your item change request has been approved. "
+            f"'{item_name}' has been updated: {change_description}."
+        )
 
     else:
         # Unknown type — still approved in pending_requests above, just log it
@@ -300,6 +355,52 @@ async def reject_request(
 
         rejection_message = (
             "Unfortunately your return request could not be approved. "
+            f"Reason: {body.note or 'No reason provided'}."
+        )
+
+    elif req["type"] == "item_change":
+ 
+        item_name   = req.get("item_name", "Unknown item")
+        new_size    = req.get("new_size", "")
+        new_color   = req.get("new_color", "")
+        old_size    = req.get("old_size", "")
+        old_color   = req.get("old_color", "")
+ 
+        change_parts = []
+        if new_size  and new_size  != old_size:
+            change_parts.append(f"size {old_size} → {new_size}")
+        if new_color and new_color != old_color:
+            change_parts.append(f"colour {old_color} → {new_color}")
+        change_description = ", ".join(change_parts) if change_parts else "no change"
+ 
+        # Mirror rejection to order + push to status_history
+        await db.orders.update_one(
+            {"_id": order_id},
+            {
+                "$set": {
+                    "item_change_request.status":           "rejected",
+                    "item_change_request.resolved_at":      now,
+                    "item_change_request.resolution_note":  body.note,
+                },
+                "$push": {
+                    "status_history": {
+                        "status":     "Item Change Rejected",
+                        "note": (
+                            f"Change request rejected for '{item_name}': "
+                            f"{change_description}. "
+                            f"Reason: {body.note or 'No reason provided'}. "
+                            f"Rejected by {current_user.get('email')}."
+                        ),
+                        "timestamp":  now,
+                        "updated_by": current_user.get("email"),
+                    }
+                }
+            }
+        )
+ 
+        rejection_message = (
+            f"Unfortunately your item change request for '{item_name}' "
+            f"({change_description}) could not be approved. "
             f"Reason: {body.note or 'No reason provided'}."
         )
 

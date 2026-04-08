@@ -16,10 +16,21 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
   // Detect request type
   const isDateChange = request.type === "date_change"
   const isReturn     = request.type === "return_request"
+  const isOrderChange = request.type === "item_change"
 
   // Existing variables for date change (kept unchanged)
   const currentDate   = order.current_delivery || request.current_value
   const requestedDate = request.requested_value
+
+  const currentVariant = {
+  size: request.old_size || '',
+  color: request.old_color || '',
+  }
+
+  const requestedVariant = {
+    size: request.new_size || '',
+    color: request.new_color || '',
+  }
 
   async function handleApprove() {
     setActing(true)
@@ -54,7 +65,9 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
           <div>
             <p style={styles.headerEyebrow}>
               {isDateChange ? "Delivery date change" : 
-               isReturn ? "Return Request" : "Request"}
+              isReturn ? "Return Request" : 
+              isOrderChange ? "Item Change Request" :
+              "Request"}
             </p>
             <h3 style={styles.headerTitle}>
               <span className="mono">#{(request.order_id || '').slice(-8).toUpperCase()}</span>
@@ -127,6 +140,51 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
               <Row label="Status" value={
                 <span className={`badge badge-${request.status}`}>{request.status}</span>
               } />
+            </Section>
+          )}
+
+          {/* ==================== NEW: ORDER CHANGE SECTION ==================== */}
+          {isOrderChange && (
+            <Section title="Item Change Details">
+
+              <Row label="Item" value={
+                request.item_name || '—'
+              } />
+
+              <Row label="Current Variant" value={
+                currentVariant.size || currentVariant.color
+                  ? `${currentVariant.size || '-'} / ${currentVariant.color || '-'}`
+                  : '—'
+              } />
+
+              <Row label="Requested Variant" value={
+                requestedVariant.size || requestedVariant.color
+                  ? (
+                    <span style={{ color: 'var(--blue-text)', fontWeight: '600' }}>
+                      {requestedVariant.size || '-'} / {requestedVariant.color || '-'}
+                    </span>
+                  )
+                  : '—'
+              } />
+
+              <Row label="Stock Source" value={
+                request.stock_source === "warehouse"
+                  ? "Warehouse"
+                  : request.stock_source === "products"
+                    ? "Product Catalogue"
+                    : '—'
+              } />
+
+              <Row label="Submitted" value={
+                <span className="mono" style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                  {formatDateTime(request.created_at)}
+                </span>
+              } />
+
+              <Row label="Status" value={
+                <span className={`badge badge-${request.status}`}>{request.status}</span>
+              } />
+
             </Section>
           )}
 
