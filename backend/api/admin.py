@@ -167,14 +167,19 @@ async def _pg_approve_request(
         {"id": request_id, "resolved_at": now, "resolved_by": admin_email, "note": note}
     )
 
+    # Strip to plain date — the column is DATE, not TIMESTAMPTZ
+    requested_date = req["requested_date"]
+    if isinstance(requested_date, datetime):
+        requested_date = requested_date.date()
+
     await session.execute(
-        text("""
-            UPDATE orders
-            SET order_estimated_delivery_date = :requested_date
-            WHERE order_id = :order_id
-        """),
-        {"requested_date": req["requested_date"], "order_id": req["order_id"]}
-    )
+            text("""
+                UPDATE orders
+                SET order_estimated_delivery_date = :requested_date
+                WHERE order_id = :order_id
+            """),
+            {"requested_date": requested_date, "order_id": req["order_id"]}
+        )
 
     await session.commit()
 
@@ -283,6 +288,29 @@ async def _pg_get_stats(session: AsyncSession) -> dict:
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+
+
+@router.get("/requests/stats")
+async def get_stats(
+    current_user: dict         = Depends(get_current_admin),
+    session:      AsyncSession = Depends(get_pg_session),
+):
+    if settings.db_tool_mode == "postgres":
+        return await _pg_get_stats(session)
+
+    from backend.database import get_db
+    db       = get_db()
+    pending  = await db.pending_requests.count_documents({"status": "pending"})
+    approved = await db.pending_requests.count_documents({"status": "approved"})
+    rejected = await db.pending_requests.count_documents({"status": "rejected"})
+    return {
+        "pending":  pending,
+        "approved": approved,
+        "rejected": rejected,
+        "total":    pending + approved + rejected,
+    }
+
 
 @router.get("/requests")
 async def get_pending_requests(
@@ -453,23 +481,3 @@ async def reject_request(
     await ws_manager.notify_session(session_id=session_id, payload={"type": "request_resolved", "status": "rejected", "message": rejection_message})
     return {"status": "rejected", "request_id": request_id, "note": body.note}
 
-
-@router.get("/requests/stats")
-async def get_stats(
-    current_user: dict         = Depends(get_current_admin),
-    session:      AsyncSession = Depends(get_pg_session),
-):
-    if settings.db_tool_mode == "postgres":
-        return await _pg_get_stats(session)
-
-    from backend.database import get_db
-    db       = get_db()
-    pending  = await db.pending_requests.count_documents({"status": "pending"})
-    approved = await db.pending_requests.count_documents({"status": "approved"})
-    rejected = await db.pending_requests.count_documents({"status": "rejected"})
-    return {
-        "pending":  pending,
-        "approved": approved,
-        "rejected": rejected,
-        "total":    pending + approved + rejected,
-    }

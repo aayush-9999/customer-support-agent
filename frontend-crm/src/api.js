@@ -46,13 +46,20 @@ export async function login(email, password) {
 }
 
 // ── Admin requests ────────────────────────────────────────────────────────────
+function normalizeRequest(req) {
+  return {
+    ...req,
+    _id:             req._id            ?? req.id,             // Mongo: _id  | PG: id
+    requested_value: req.requested_value ?? req.requested_date, // Mongo field | PG field
+    current_value:   req.current_value   ?? req.current_date,   // Mongo field | PG field
+  }
+}
 
 export async function fetchRequests(status = 'pending') {
   const data = await request('GET', `/admin/requests?status=${status}`)
-  // Backend returns { requests: [...], total: N }
-  return Array.isArray(data) ? data : (data.requests ?? [])
+  const rows = Array.isArray(data) ? data : (data.requests ?? [])
+  return rows.map(normalizeRequest)
 }
-
 export async function fetchStats() {
   return request('GET', '/admin/requests/stats')
 }
