@@ -89,7 +89,6 @@ export function useChat(user) {
     let cancelled = false;
 
     async function init() {
-      // Load sidebar history
       try {
         const data = await getConversationHistory();
         if (!cancelled) {
@@ -99,9 +98,7 @@ export function useChat(user) {
 
       if (!cancelled) setHistoryLoaded(true);
 
-      // Start fresh session
       try {
-        // getNewSession() already returns the session_id string (see api.js)
         const sid = await getNewSession();
         if (!cancelled) {
           setSessionId(sid);
@@ -127,15 +124,39 @@ export function useChat(user) {
       wsRef.current.close();
     }
 
-    // KEY FIX: role="notification" rows → banner pills, not bubbles.
-    // Any unknown/legacy role is silently skipped.
+    // Restore messages for display, applying these filters:
+    //
+    //   role="notification"  → banner pill (not a chat bubble)
+    //   role="user"          → user bubble ✓
+    //   role="assistant"     → only if content is NOT a raw tool-call encoding.
+    //                          Messages starting with "__tool_calls__:" are internal
+    //                          LLM protocol rows — they are NOT human-readable replies
+    //                          and should never be rendered as chat bubbles.
+    //   role="tool"          → raw JSON tool result — skip entirely from UI
+    //   anything else        → skip silently
+    //
     const restored = (conv.messages || []).flatMap((m) => {
       if (m.role === "notification") {
         return [makeNotification(m.content, m.status || "approved")];
       }
-      if (m.role === "user" || m.role === "assistant") {
-        return [makeBubble(m.role, m.content, { timestamp: m.timestamp })];
+
+      if (m.role === "user") {
+        return [makeBubble("user", m.content, { timestamp: m.timestamp })];
       }
+
+      if (m.role === "assistant") {
+        // Skip tool-call encoding rows — they start with the internal marker
+        if (m.content && m.content.startsWith("__tool_calls__:")) {
+          return [];
+        }
+        // Skip empty content (shouldn't happen, but guard anyway)
+        if (!m.content || !m.content.trim()) {
+          return [];
+        }
+        return [makeBubble("assistant", m.content, { timestamp: m.timestamp })];
+      }
+
+      // role="tool" (raw JSON result) and any unknown roles are skipped
       return [];
     });
 
@@ -160,7 +181,6 @@ export function useChat(user) {
   }, [connectWs]);
 
   // ── Send a message ─────────────────────────────────────────────────────────
-  // api.js sendMessage signature: sendMessage({ message, sessionId })
   const send = useCallback(async (text) => {
     if (!text.trim() || loading || !sessionId) return;
 

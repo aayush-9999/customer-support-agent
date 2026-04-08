@@ -1,7 +1,4 @@
 # backend/tools/mongo_tools.py
-# Diff from original: ChangeDeliveryDate.execute() now calls
-# ws_manager.broadcast_to_admins() after inserting a pending_request,
-# so the CRM gets a push instead of waiting for a 10s poll.
 
 import logging
 from datetime import datetime, timezone, timedelta
@@ -47,6 +44,54 @@ def serialize_dates(obj):
     if isinstance(obj, dict):
         return {k: serialize_dates(v) for k, v in obj.items()}
     return obj
+
+
+# ── 0. Think Tool ───────────────────────────────────────────────────────────────
+# A no-op tool that forces the model to externalise its reasoning before
+# calling any data-fetching tool. Costs almost nothing (result is just
+# {"ok": true}) but prevents the most common agent mistakes on smaller models:
+#   - Calling get_order_details without a confirmed ID
+#   - Calling change_delivery_date without reading warehouse date first
+#   - Making a tool call when the answer is already in history
+
+class ThinkTool(BaseTool):
+    @property
+    def name(self) -> str:
+        return "think"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Use this tool to reason through a problem before acting. "
+            "Call it BEFORE any data-fetching or mutation tool call to plan your approach. "
+            "Ask yourself: What does the customer want? Do I already have the data in history? "
+            "Which tool gets it? Do I have all required arguments confirmed? "
+            "This tool has no side effects — it just records your reasoning."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "reasoning": {
+                    "type": "string",
+                    "description": (
+                        "Your step-by-step plan: what the customer wants, "
+                        "what data you already have, which tool you'll call next and why, "
+                        "and what arguments you already have confirmed."
+                    )
+                }
+            },
+            "required": ["reasoning"]
+        }
+
+    async def execute(self, **kwargs: Any) -> dict:
+        # No-op — the value is in forcing the model to write the reasoning,
+        # not in doing anything with it.
+        reasoning = kwargs.get("reasoning", "")
+        logger.debug(f"[THINK] {reasoning[:200]}")
+        return {"ok": True}
 
 
 # ── 1. Get Order Details ────────────────────────────────────────────────────────
@@ -101,7 +146,6 @@ class GetOrderDetails(BaseTool):
             if not order:
                 return self.error(f"No order found with ID {order_id}.")
 
-            # Enrich with invoice if available
             invoice = None
             if order.get("invoiceId"):
                 try:
@@ -112,7 +156,6 @@ class GetOrderDetails(BaseTool):
 
             data = _serialize(order)
 
-            # Attach payment summary from invoice if found
             if invoice:
                 erp = invoice.get("metadata", {}).get("erpDetails", {})
                 data["payment_summary"] = {
@@ -240,7 +283,6 @@ class GetOrderHistory(BaseTool):
                 }
             ).sort("createdAt", -1).limit(10)
 
-            # Separate active vs completed orders so agent can surface active first
             active_statuses = {"Processing", "In process", "Shipped", "In Transit",
                                "Out for Delivery", "Ready for delivery", "Delayed"}
 
@@ -272,7 +314,6 @@ class GetOrderHistory(BaseTool):
                 else:
                     other_orders.append(entry)
 
-            # Return active orders first, then the rest
             orders = active_orders + other_orders
 
             if not orders:
@@ -427,7 +468,6 @@ class ChangeDeliveryDate(BaseTool):
 
             status = order.get("status", "")
 
-            # 1. Terminal states
             if status in ("Delivered", "Completed", "Cancelled"):
                 return self.success({
                     "outcome": "rejected",
@@ -438,7 +478,6 @@ class ChangeDeliveryDate(BaseTool):
                     "order_id": order_id,
                 })
 
-            # 2. Get warehouse date
             warehouse_dt = order.get("estimated_warehouse_date")
             if not warehouse_dt:
                 return self.error(
@@ -448,7 +487,6 @@ class ChangeDeliveryDate(BaseTool):
             if isinstance(warehouse_dt, datetime) and warehouse_dt.tzinfo is None:
                 warehouse_dt = warehouse_dt.replace(tzinfo=timezone.utc)
 
-            # 3. Feasibility check
             if req_dt < warehouse_dt:
                 return self.success({
                     "outcome": "rejected",
@@ -465,7 +503,6 @@ class ChangeDeliveryDate(BaseTool):
                     ).date().isoformat(),
                 })
 
-            # 4. Check for existing pending request
             existing = order.get("delivery_date_change_request")
             if existing and existing.get("status") == "pending":
                 return self.success({
@@ -483,7 +520,6 @@ class ChangeDeliveryDate(BaseTool):
                     "request_id": existing.get("request_id"),
                 })
 
-            # 5. Feasible + no existing — write to pending_requests collection
             now = datetime.now(timezone.utc)
 
             pending_doc = {
@@ -504,7 +540,6 @@ class ChangeDeliveryDate(BaseTool):
             result = await self._db.pending_requests.insert_one(pending_doc)
             request_id = str(result.inserted_id)
 
-            # Mirror lightweight reference back to order
             await self._db.orders.update_one(
                 {"_id": oid},
                 {"$set": {
@@ -517,9 +552,6 @@ class ChangeDeliveryDate(BaseTool):
                 }}
             )
 
-            # ── FIX: push to all connected CRM admin tabs immediately.
-            # Import here (not at module top) to avoid circular imports since
-            # ws_manager lives in the api layer.
             try:
                 from backend.api.websocket import ws_manager
                 await ws_manager.broadcast_to_admins({
@@ -528,7 +560,6 @@ class ChangeDeliveryDate(BaseTool):
                     "order_id":   order_id,
                 })
             except Exception as broadcast_err:
-                # Never let a failed broadcast block the tool response.
                 logger.warning(f"Admin broadcast failed: {broadcast_err}")
 
             return self.success({
@@ -708,7 +739,6 @@ class GetOrderTracking(BaseTool):
         except Exception:
             return self.error("Invalid order ID format.")
 
-        # Resolve user from email
         user = await self._db.users.find_one(
             {"email": {"$regex": f"^{email}$", "$options": "i"}},
             {"_id": 1}
@@ -716,16 +746,13 @@ class GetOrderTracking(BaseTool):
         if not user:
             return self.error(f"No account found for email: {email}")
 
-        # Fetch main order
         order = await self._db.orders.find_one({"_id": oid})
         if not order:
             return self.error(f"No order found with ID {order_id}.")
 
-        # Verify ownership
         if str(user["_id"]) != str(order.get("userId")):
             return self.error("This order does not belong to the provided email.")
 
-        # Enrich with invoice
         invoice = None
         if order.get("invoiceId"):
             try:
@@ -733,10 +760,8 @@ class GetOrderTracking(BaseTool):
             except Exception:
                 pass
 
-        # Check for return
         return_doc = await self._db.returns.find_one({"orderId": oid})
 
-        # Build clean tracking response
         tracking = {
             "order_id": str(order["_id"]),
             "status": order.get("status", "Unknown"),
@@ -815,7 +840,6 @@ class GetInvoiceDetails(BaseTool):
             return self.error("email is required.")
 
         try:
-            # Resolve user from email
             user = await self._db.users.find_one(
                 {"email": {"$regex": f"^{email}$", "$options": "i"}},
                 {"_id": 1}
@@ -823,7 +847,6 @@ class GetInvoiceDetails(BaseTool):
             if not user:
                 return self.error(f"No account found for email: {email}")
 
-            # Fetch order and verify ownership
             order = await self._db.orders.find_one({"_id": ObjectId(order_id)})
             if not order:
                 return self.error(f"No order found with ID {order_id}")
@@ -831,7 +854,6 @@ class GetInvoiceDetails(BaseTool):
             if str(user["_id"]) != str(order.get("userId")):
                 return self.error("This order does not belong to the provided email.")
 
-            # Fetch invoice via invoiceId on the order
             invoice = None
             if order.get("invoiceId"):
                 invoice = await self._db.invoices.find_one({"_id": ObjectId(order["invoiceId"])})
@@ -839,7 +861,6 @@ class GetInvoiceDetails(BaseTool):
             if not invoice:
                 return self.error("No invoice found for this order.")
 
-            # Extract relevant fields
             erp     = invoice.get("metadata", {}).get("erpDetails", {})
             card    = invoice.get("metadata", {}).get("creditCardProcessing", {})
             loyalty = invoice.get("metadata", {}).get("loyaltyRewards", {})
@@ -1559,6 +1580,7 @@ class ChangeOrderItem(BaseTool):
 
 def get_all_tools(db: AsyncIOMotorDatabase) -> list[BaseTool]:
     return [
+        ThinkTool(),                  # ← no-op reasoning tool, no DB needed
         GetOrderDetails(db),
         GetUserProfile(db),
         GetOrderHistory(db),
