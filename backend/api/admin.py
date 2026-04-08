@@ -1,6 +1,5 @@
 # backend/api/admin.py
 
-import uuid
 import logging
 from datetime import datetime, date, timezone
 from fastapi import APIRouter, Depends, HTTPException
@@ -75,6 +74,14 @@ async def _pg_get_pending_requests(status: str, session: AsyncSession) -> list[d
                 pr.resolved_at,
                 pr.resolved_by,
                 pr.resolution_note,
+                pr.requested_address,
+                pr.requested_city,
+                pr.requested_state,
+                pr.requested_pincode,
+                pr.current_address,
+                pr.current_city,
+                pr.current_state,
+                pr.current_pincode,
 
                 o.order_status,
                 o.order_estimated_delivery_date,
@@ -123,6 +130,14 @@ async def _pg_get_pending_requests(status: str, session: AsyncSession) -> list[d
             "resolved_at":     str(row["resolved_at"])    if row["resolved_at"]    else None,
             "resolved_by":     row["resolved_by"],
             "resolution_note": row["resolution_note"],
+            "requested_address": row["requested_address"],
+            "requested_city":    row["requested_city"],
+            "requested_state":   row["requested_state"],
+            "requested_pincode": row["requested_pincode"],
+            "current_address":   row["current_address"],
+            "current_city":      row["current_city"],
+            "current_state":     row["current_state"],
+            "current_pincode":   row["current_pincode"],
             "order": {
                 "status":           row["order_status"],
                 "current_delivery": str(row["order_estimated_delivery_date"]) if row["order_estimated_delivery_date"] else None,
@@ -135,7 +150,6 @@ async def _pg_get_pending_requests(status: str, session: AsyncSession) -> list[d
             },
         })
     return requests
-
 
 async def _pg_approve_request(
     request_id:    str,
@@ -168,12 +182,15 @@ async def _pg_approve_request(
         {"id": request_id, "resolved_at": now, "resolved_by": admin_email, "note": note}
     )
 
-    # Strip to plain date — the column is DATE, not TIMESTAMPTZ
-    requested_date = req["requested_date"]
-    if isinstance(requested_date, datetime):
-        requested_date = requested_date.date()
+    # ── Branch on request type ────────────────────────────────────────────────
 
-    await session.execute(
+    if req["type"] == "date_change":
+        # Strip to plain date — the column is DATE, not TIMESTAMPTZ
+        requested_date = req["requested_date"]
+        if isinstance(requested_date, datetime):
+            requested_date = requested_date.date()
+
+        await session.execute(
             text("""
                 UPDATE orders
                 SET order_estimated_delivery_date = :requested_date
@@ -182,14 +199,47 @@ async def _pg_approve_request(
             {"requested_date": requested_date, "order_id": req["order_id"]}
         )
 
-    await session.commit()
+        approval_message = (
+            f"Great news! Your delivery date change request has been approved. "
+            f"Your new delivery date is {_format_date(req['requested_date'])}."
+        )
 
-    # FIX: req["requested_date"] from a DATE column is a plain datetime.date,
-    # not a datetime. Using _format_date() handles both types safely.
-    approval_message = (
-        f"Great news! Your delivery date change request has been approved. "
-        f"Your new delivery date is {_format_date(req['requested_date'])}."
-    )
+    elif req["type"] == "address_change":
+        new_address = (
+            f"{req['requested_address']}, {req['requested_city']}, "
+            f"{req['requested_state']} - {req['requested_pincode']}"
+        )
+
+        await session.execute(
+            text("""
+                UPDATE orders
+                SET delivery_full_address = :full_address,
+                    delivery_city         = :city,
+                    delivery_state        = :state,
+                    delivery_pincode      = :pincode
+                WHERE order_id = :order_id
+            """),
+            {
+                "full_address": req["requested_address"],
+                "city":         req["requested_city"],
+                "state":        req["requested_state"],
+                "pincode":      req["requested_pincode"],
+                "order_id":     req["order_id"],
+            }
+        )
+
+        approval_message = (
+            f"Great news! Your delivery address change request has been approved. "
+            f"Your new delivery address is {new_address}."
+        )
+
+    else:
+        # Fallback for any future request types
+        approval_message = "Your request has been approved."
+
+    # ── Commit + notify (same for all types) ─────────────────────────────────
+
+    await session.commit()
 
     session_id = req["session_id"] or ""
     if session_id:
@@ -209,7 +259,6 @@ async def _pg_approve_request(
     )
 
     return {"status": "approved", "request_id": request_id, "note": note}
-
 
 async def _pg_reject_request(
     request_id:    str,
@@ -243,7 +292,13 @@ async def _pg_reject_request(
     )
     await session.commit()
 
-    rejection_message = (
+    if req["type"] == "address_change":
+        rejection_message = (
+        "Unfortunately your delivery address change request could not be approved. "
+        f"Reason: {note or 'No reason provided'}."
+    )
+    else:
+        rejection_message = (
         "Unfortunately your delivery date change request could not be approved. "
         f"Reason: {note or 'No reason provided'}."
     )
@@ -369,12 +424,25 @@ async def get_pending_requests(
 @router.post("/requests/{request_id}/approve")
 async def approve_request(
     request_id:    str,
-    body:          ResolutionBody = ResolutionBody(),
-    current_user:  dict = Depends(get_current_admin),
-    db:            AsyncIOMotorDatabase = Depends(get_db),
+    body:          ResolutionBody    = ResolutionBody(),
+    current_user:  dict              = Depends(get_current_admin),
     conversations: ConversationStore = Depends(get_conversations),
+    session:       AsyncSession      = Depends(get_pg_session),
 ):
-    """Approve a pending request — handles date_change and return_request types."""
+    if settings.db_tool_mode == "postgres":
+        return await _pg_approve_request(
+            request_id    = request_id,
+            note          = body.note,
+            admin_email   = current_user.get("email"),
+            session       = session,
+            conversations = conversations,
+        )
+
+    # Mongo
+    from bson import ObjectId
+    from backend.database import get_db
+    db  = get_db()
+    now = datetime.now(timezone.utc)
     try:
         rid = ObjectId(request_id)
     except Exception:
@@ -383,15 +451,7 @@ async def approve_request(
     if not req:
         raise HTTPException(status_code=404, detail="Request not found.")
     if req["status"] != "pending":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Request is already '{req['status']}'."
-        )
-
-    now      = datetime.now(timezone.utc)
-    order_id = req["order_id"]
-
-    # ── Mark pending_request as approved (same for all types) ─────────────────
+        raise HTTPException(status_code=400, detail=f"Request is already '{req['status']}'.")
     await db.pending_requests.update_one(
         {"_id": rid},
         {"$set": {
@@ -401,108 +461,29 @@ async def approve_request(
             "resolution_note": body.note,
         }}
     )
-
-    # ── Type-specific logic ────────────────────────────────────────────────────
-
-    if req["type"] == "date_change":
-        # Apply the new delivery date to the order — behaviour unchanged
-        await db.orders.update_one(
-            {"_id": order_id},
-            {"$set": {
-                "estimated_destination_date":               req["requested_value"],
-                "delivery_date_change_request.status":      "approved",
-                "delivery_date_change_request.resolved_at": now,
-            }}
-        )
-
-        approval_message = (
-            f"Great news! Your delivery date change request has been approved. "
-            f"Your new delivery date is "
-            f"{req['requested_value'].strftime('%B %d, %Y')}."
-        )
-
-    elif req["type"] == "return_request":
-        # Generate RMA number and create the returns document
-        rma_number = f"RMA-{str(uuid.uuid4()).upper()[:8]}"
-
-        return_doc = {
-            "orderId":                    order_id,
-            "userId":                     req.get("user_id"),
-            "status":                     "Requested",
-            "rma_number":                 rma_number,
-            "reason":                     req.get("reason"),
-            "items":                      req.get("items", []),
-            "refund_method":              req.get("refund_method"),
-            "return_shipping_covered_by": req.get("return_shipping_covered_by"),
-            "created_at":                 req.get("created_at"),
-            "approved_at":                now,
-            "approved_by":                current_user.get("email"),
-            "resolved_at":                None,
-            "resolution_note":            body.note,
-        }
-        await db.returns.insert_one(return_doc)
-
-        # Mirror status + RMA back to order
-        await db.orders.update_one(
-            {"_id": order_id},
-            {"$set": {
-                "return_request.status":      "approved",
-                "return_request.rma_number":  rma_number,
-                "return_request.resolved_at": now,
-            }}
-        )
-
-        shipping_note = (
-            "Leafy will email you a free return label."
-            if req.get("return_shipping_covered_by") == "leafy"
-            else "Return shipping is at your cost."
-        )
-        approval_message = (
-            f"Great news! Your return request has been approved. "
-            f"Your RMA number is {rma_number}. "
-            f"Please ship the item(s) back within 7 days. "
-            f"{shipping_note}"
-        )
-
-    else:
-        # Unknown type — still approved in pending_requests above, just log it
-        logger.warning(f"approve_request: unknown request type '{req.get('type')}'")
-        approval_message = "Your request has been approved."
-
-    logger.info(f"Request {request_id} approved by {current_user.get('email')}")
-
-    # ── Notify customer ────────────────────────────────────────────────────────
-    session_id = str(req.get("session_id", ""))
-
-    if session_id:
-        await conversations.append_notification(
-            session_id = session_id,
-            message    = approval_message,
-            status     = "approved",
-        )
-
-    await ws_manager.notify_session(
-        session_id = session_id,
-        payload    = {
-            "type":    "request_resolved",
-            "status":  "approved",
-            "message": approval_message,
-        }
-    )
-
-    return {
-        "status":     "approved",
-        "request_id": request_id,
-        "note":       body.note,
+    update_fields = {
+        "delivery_date_change_request.status":      "approved",
+        "delivery_date_change_request.resolved_at": now,
     }
+    if req["type"] == "date_change":
+        update_fields["estimated_destination_date"] = req["requested_value"]
+    await db.orders.update_one({"_id": req["order_id"]}, {"$set": update_fields})
+    approval_message = (
+        f"Great news! Your delivery date change request has been approved. "
+        f"Your new delivery date is {_format_date(req['requested_value'])}."
+    )
+    session_id = str(req.get("session_id", ""))
+    if session_id:
+        await conversations.append_notification(session_id=session_id, message=approval_message, status="approved")
+    await ws_manager.notify_session(session_id=session_id, payload={"type": "request_resolved", "status": "approved", "message": approval_message})
+    return {"status": "approved", "request_id": request_id, "note": body.note}
 
 
 @router.post("/requests/{request_id}/reject")
 async def reject_request(
     request_id:    str,
-    body:          ResolutionBody = ResolutionBody(),
-    current_user:  dict = Depends(get_current_admin),
-    db:            AsyncIOMotorDatabase = Depends(get_db),
+    body:          ResolutionBody    = ResolutionBody(),
+    current_user:  dict              = Depends(get_current_admin),
     conversations: ConversationStore = Depends(get_conversations),
     session:       AsyncSession      = Depends(get_pg_session),
 ):
@@ -528,15 +509,7 @@ async def reject_request(
     if not req:
         raise HTTPException(status_code=404, detail="Request not found.")
     if req["status"] != "pending":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Request is already '{req['status']}'."
-        )
-
-    now      = datetime.now(timezone.utc)
-    order_id = req["order_id"]
-
-    # ── Mark pending_request as rejected (same for all types) ─────────────────
+        raise HTTPException(status_code=400, detail=f"Request is already '{req['status']}'.")
     await db.pending_requests.update_one(
         {"_id": rid},
         {"$set": {
@@ -546,55 +519,20 @@ async def reject_request(
             "resolution_note": body.note,
         }}
     )
-
-    # ── Type-specific logic ────────────────────────────────────────────────────
-
-    if req["type"] == "date_change":
-        # Mirror rejection back to order — behaviour unchanged
-        await db.orders.update_one(
-            {"_id": order_id},
-            {"$set": {
-                "delivery_date_change_request.status":           "rejected",
-                "delivery_date_change_request.resolved_at":      now,
-                "delivery_date_change_request.resolution_note":  body.note,
-            }}
-        )
-
-        rejection_message = (
-            "Unfortunately your delivery date change request could not be approved. "
-            f"Reason: {body.note or 'No reason provided'}."
-        )
-
-    elif req["type"] == "return_request":
-        # Mirror rejection back to order
-        await db.orders.update_one(
-            {"_id": order_id},
-            {"$set": {
-                "return_request.status":           "rejected",
-                "return_request.resolved_at":      now,
-                "return_request.resolution_note":  body.note,
-            }}
-        )
-
-        rejection_message = (
-            "Unfortunately your return request could not be approved. "
-            f"Reason: {body.note or 'No reason provided'}."
-        )
-
-    else:
-        logger.warning(f"reject_request: unknown request type '{req.get('type')}'")
-        rejection_message = (
-            "Unfortunately your request could not be approved. "
-            f"Reason: {body.note or 'No reason provided'}."
-        )
-
-    logger.info(f"Request {request_id} rejected by {current_user.get('email')}")
-
-    # ── Notify customer ────────────────────────────────────────────────────────
+    await db.orders.update_one(
+        {"_id": req["order_id"]},
+        {"$set": {
+            "delivery_date_change_request.status":          "rejected",
+            "delivery_date_change_request.resolved_at":    now,
+            "delivery_date_change_request.resolution_note": body.note,
+        }}
+    )
+    rejection_message = (
+        f"Unfortunately your delivery date change request could not be approved. "
+        f"Reason: {body.note or 'No reason provided'}."
+    )
     session_id = str(req.get("session_id", ""))
-
     if session_id:
         await conversations.append_notification(session_id=session_id, message=rejection_message, status="rejected")
     await ws_manager.notify_session(session_id=session_id, payload={"type": "request_resolved", "status": "rejected", "message": rejection_message})
     return {"status": "rejected", "request_id": request_id, "note": body.note}
-
