@@ -13,10 +13,11 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
   const order    = request.order    || {}
   const tier     = customer.loyaltyTier || 'Bronze'
 
-  // DB field names from mongo_tools.py:
-  //   requested_value → the new date customer wants
-  //   current_value   → order's estimated_destination_date at time of request
-  //   order.current_delivery → enriched by admin.py from orders collection
+  // Detect request type
+  const isDateChange = request.type === "date_change"
+  const isReturn     = request.type === "return_request"
+
+  // Existing variables for date change (kept unchanged)
   const currentDate   = order.current_delivery || request.current_value
   const requestedDate = request.requested_value
 
@@ -47,10 +48,14 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
   return (
     <div style={styles.overlay}>
       <div style={styles.drawer}>
+
         {/* Header */}
         <div style={styles.header}>
           <div>
-            <p style={styles.headerEyebrow}>Delivery date change</p>
+            <p style={styles.headerEyebrow}>
+              {isDateChange ? "Delivery date change" : 
+               isReturn ? "Return Request" : "Request"}
+            </p>
             <h3 style={styles.headerTitle}>
               <span className="mono">#{(request.order_id || '').slice(-8).toUpperCase()}</span>
             </h3>
@@ -63,36 +68,69 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
         </div>
 
         <div style={styles.body}>
-          {/* Customer info */}
+
+          {/* Customer info - unchanged */}
           <Section title="Customer">
             <Row label="Name"  value={customer.name || '—'} />
             <Row label="Email" value={<span className="mono" style={{fontSize:'11.5px'}}>{customer.email || '—'}</span>} />
             <Row label="Tier"  value={<span className={`badge badge-${tier.toLowerCase()}`}>{tier}</span>} />
           </Section>
 
-          {/* Date change info */}
-          <Section title="Request details">
-            <Row label="Current delivery" value={
-              <span className="mono" style={styles.dateMono}>
-                {formatDate(currentDate)}
-              </span>
-            } />
-            <Row label="Requested date" value={
-              <span className="mono" style={{ ...styles.dateMono, color: 'var(--blue-text)' }}>
-                {formatDate(requestedDate)}
-              </span>
-            } />
-            <Row label="Submitted" value={
-              <span className="mono" style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
-                {formatDateTime(request.created_at)}
-              </span>
-            } />
-            <Row label="Status" value={
-              <span className={`badge badge-${request.status}`}>{request.status}</span>
-            } />
-          </Section>
+          {/* ==================== DATE CHANGE SECTION (Original - untouched) ==================== */}
+          {isDateChange && (
+            <Section title="Request details">
+              <Row label="Current delivery" value={
+                <span className="mono" style={styles.dateMono}>
+                  {formatDate(currentDate)}
+                </span>
+              } />
+              <Row label="Requested date" value={
+                <span className="mono" style={{ ...styles.dateMono, color: 'var(--blue-text)' }}>
+                  {formatDate(requestedDate)}
+                </span>
+              } />
+              <Row label="Submitted" value={
+                <span className="mono" style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                  {formatDateTime(request.created_at)}
+                </span>
+              } />
+              <Row label="Status" value={
+                <span className={`badge badge-${request.status}`}>{request.status}</span>
+              } />
+            </Section>
+          )}
 
-          {/* Order snapshot */}
+          {/* ==================== NEW: RETURN REQUEST SECTION ==================== */}
+          {isReturn && (
+            <Section title="Return Request Details">
+              <Row label="Reason" value={
+                request.reason ? request.reason.replace(/_/g, " ") : '—'
+              } />
+              <Row label="Items to Return" value={
+                Array.isArray(request.items) && request.items.length > 0
+                  ? request.items.join(", ")
+                  : '—'
+              } />
+              <Row label="Refund Method" value={
+                request.refund_method ? request.refund_method.replace(/_/g, " ") : '—'
+              } />
+              <Row label="Return Shipping" value={
+                request.return_shipping_covered_by === "leafy" 
+                  ? "Covered by Leafy" 
+                  : "Paid by Customer"
+              } />
+              <Row label="Submitted" value={
+                <span className="mono" style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                  {formatDateTime(request.created_at)}
+                </span>
+              } />
+              <Row label="Status" value={
+                <span className={`badge badge-${request.status}`}>{request.status}</span>
+              } />
+            </Section>
+          )}
+
+          {/* Order snapshot - kept for both types */}
           {order.products && order.products.length > 0 && (
             <Section title="Order snapshot">
               <Row label="Status" value={
@@ -113,7 +151,7 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
             </Section>
           )}
 
-          {/* Customer note from agent (if any) */}
+          {/* Customer note from agent (if any) - unchanged */}
           {request.customer_note && (
             <Section title="Customer message">
               <blockquote style={styles.quote}>
@@ -127,7 +165,7 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
           )}
         </div>
 
-        {/* Action footer — only show for pending */}
+        {/* Action footer — only show for pending - unchanged */}
         {request.status === 'pending' && (
           <div style={styles.footer}>
             {rejectOpen ? (
@@ -185,7 +223,7 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
           </div>
         )}
 
-        {/* Resolution info if already actioned */}
+        {/* Resolution info if already actioned - unchanged */}
         {request.status !== 'pending' && request.resolved_at && (
           <div style={styles.resolvedFooter}>
             <span style={styles.resolvedLabel}>
@@ -200,6 +238,8 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
     </div>
   )
 }
+
+/* ==================== Helper Components & Styles (unchanged) ==================== */
 
 function Section({ title, children }) {
   return (

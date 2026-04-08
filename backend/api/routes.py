@@ -101,56 +101,24 @@ async def chat(
             history      = history,
         )
 
-        # ── Link session_id to the pending_request after agent returns ────────
-        #
-        # The ChangeDeliveryDatePG tool inserts the pending_request with
-        # session_id=NULL because the tool layer has no knowledge of the HTTP
-        # session. We backfill it here using the already-injected pg_session
-        # (same DI-managed connection, no new session needed).
-        #
-        # FIX: was using bare `session_id` / `user_id` (NameError) instead of
-        #      `body.session_id` / `current_user["_id"]`.
-        # FIX: was spinning up a new session via `async for pg_session in
-        #      get_pg_session()` which creates an unmanaged session outside DI.
+        # Link the pending_request to this session if a date-change was made.
+        # (Allows admin approval to push a WebSocket notification to the right customer.)
+        # REPLACE WITH
+        TOOLS_NEEDING_SESSION = {"change_delivery_date", "initiate_return"}
 
-        date_change_called = any(
-            tc.tool_name == "change_delivery_date" for tc in response.tool_calls
-        )
-
-        if date_change_called:
-            if settings.db_tool_mode == "postgres" and pg_session is not None:
-                await pg_session.execute(
-                    text("""
-                        UPDATE pending_requests
-                        SET session_id = :session_id
-                        WHERE id = (
-                            SELECT id
-                            FROM pending_requests
-                            WHERE user_id    = :user_id
-                              AND status     = 'pending'
-                              AND session_id IS NULL
-                            ORDER BY created_at DESC
-                            LIMIT 1
-                        )
-                    """),
-                    {
-                        "session_id": body.session_id,
-                        "user_id":    str(current_user["_id"]),
-                    }
-                )
-                await pg_session.commit()
-
-            elif settings.db_tool_mode == "mongo" and db is not None:
-                from pymongo import DESCENDING
-                await db.pending_requests.find_one_and_update(
-                    {
-                        "user_id":    ObjectId(str(current_user["_id"])),
-                        "status":     "pending",
-                        "session_id": None,
-                    },
-                    {"$set": {"session_id": body.session_id}},
-                    sort=[(("created_at", DESCENDING))],
-                )
+        if db is not None and any(
+            tc.tool_name in TOOLS_NEEDING_SESSION for tc in response.tool_calls
+        ):
+            from pymongo import DESCENDING
+            await db.pending_requests.find_one_and_update(
+                {
+                    "user_id":    ObjectId(str(current_user["_id"])),
+                    "status":     "pending",
+                    "session_id": None,
+                },
+                {"$set": {"session_id": body.session_id}},
+                sort=[(("created_at", DESCENDING))],
+            )
 
         # ── Persist the full turn ─────────────────────────────────────────────
         await conversations.append_turn(

@@ -203,7 +203,7 @@ class ConversationStore:
                 "messages": [
                     {
                         "role":         m["role"],
-                        "content":      m["content"],
+                        "content":      m.get("content", ""),  # FIX: use .get() to avoid KeyError on messages missing 'content'
                         "timestamp":    m["timestamp"].isoformat(),
                         "status":       m.get("status"),
                         # These are only present on tool messages — None for all others.

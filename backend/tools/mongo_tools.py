@@ -1,7 +1,4 @@
 # backend/tools/mongo_tools.py
-# Diff from original: ChangeDeliveryDate.execute() now calls
-# ws_manager.broadcast_to_admins() after inserting a pending_request,
-# so the CRM gets a push instead of waiting for a 10s poll.
 
 import logging
 from datetime import datetime, timezone, timedelta
@@ -46,6 +43,54 @@ def serialize_dates(obj):
     if isinstance(obj, dict):
         return {k: serialize_dates(v) for k, v in obj.items()}
     return obj
+
+
+# ── 0. Think Tool ───────────────────────────────────────────────────────────────
+# A no-op tool that forces the model to externalise its reasoning before
+# calling any data-fetching tool. Costs almost nothing (result is just
+# {"ok": true}) but prevents the most common agent mistakes on smaller models:
+#   - Calling get_order_details without a confirmed ID
+#   - Calling change_delivery_date without reading warehouse date first
+#   - Making a tool call when the answer is already in history
+
+class ThinkTool(BaseTool):
+    @property
+    def name(self) -> str:
+        return "think"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Use this tool to reason through a problem before acting. "
+            "Call it BEFORE any data-fetching or mutation tool call to plan your approach. "
+            "Ask yourself: What does the customer want? Do I already have the data in history? "
+            "Which tool gets it? Do I have all required arguments confirmed? "
+            "This tool has no side effects — it just records your reasoning."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "reasoning": {
+                    "type": "string",
+                    "description": (
+                        "Your step-by-step plan: what the customer wants, "
+                        "what data you already have, which tool you'll call next and why, "
+                        "and what arguments you already have confirmed."
+                    )
+                }
+            },
+            "required": ["reasoning"]
+        }
+
+    async def execute(self, **kwargs: Any) -> dict:
+        # No-op — the value is in forcing the model to write the reasoning,
+        # not in doing anything with it.
+        reasoning = kwargs.get("reasoning", "")
+        logger.debug(f"[THINK] {reasoning[:200]}")
+        return {"ok": True}
 
 
 # ── 1. Get Order Details ────────────────────────────────────────────────────────
@@ -100,7 +145,6 @@ class GetOrderDetails(BaseTool):
             if not order:
                 return self.error(f"No order found with ID {order_id}.")
 
-            # Enrich with invoice if available
             invoice = None
             if order.get("invoiceId"):
                 try:
@@ -111,7 +155,6 @@ class GetOrderDetails(BaseTool):
 
             data = _serialize(order)
 
-            # Attach payment summary from invoice if found
             if invoice:
                 erp = invoice.get("metadata", {}).get("erpDetails", {})
                 data["payment_summary"] = {
@@ -239,7 +282,6 @@ class GetOrderHistory(BaseTool):
                 }
             ).sort("createdAt", -1).limit(10)
 
-            # Separate active vs completed orders so agent can surface active first
             active_statuses = {"Processing", "In process", "Shipped", "In Transit",
                                "Out for Delivery", "Ready for delivery", "Delayed"}
 
@@ -271,7 +313,6 @@ class GetOrderHistory(BaseTool):
                 else:
                     other_orders.append(entry)
 
-            # Return active orders first, then the rest
             orders = active_orders + other_orders
 
             if not orders:
@@ -426,7 +467,6 @@ class ChangeDeliveryDate(BaseTool):
 
             status = order.get("status", "")
 
-            # 1. Terminal states
             if status in ("Delivered", "Completed", "Cancelled"):
                 return self.success({
                     "outcome": "rejected",
@@ -437,7 +477,6 @@ class ChangeDeliveryDate(BaseTool):
                     "order_id": order_id,
                 })
 
-            # 2. Get warehouse date
             warehouse_dt = order.get("estimated_warehouse_date")
             if not warehouse_dt:
                 return self.error(
@@ -447,7 +486,6 @@ class ChangeDeliveryDate(BaseTool):
             if isinstance(warehouse_dt, datetime) and warehouse_dt.tzinfo is None:
                 warehouse_dt = warehouse_dt.replace(tzinfo=timezone.utc)
 
-            # 3. Feasibility check
             if req_dt < warehouse_dt:
                 return self.success({
                     "outcome": "rejected",
@@ -464,7 +502,6 @@ class ChangeDeliveryDate(BaseTool):
                     ).date().isoformat(),
                 })
 
-            # 4. Check for existing pending request
             existing = order.get("delivery_date_change_request")
             if existing and existing.get("status") == "pending":
                 return self.success({
@@ -482,7 +519,6 @@ class ChangeDeliveryDate(BaseTool):
                     "request_id": existing.get("request_id"),
                 })
 
-            # 5. Feasible + no existing — write to pending_requests collection
             now = datetime.now(timezone.utc)
 
             pending_doc = {
@@ -503,7 +539,6 @@ class ChangeDeliveryDate(BaseTool):
             result = await self._db.pending_requests.insert_one(pending_doc)
             request_id = str(result.inserted_id)
 
-            # Mirror lightweight reference back to order
             await self._db.orders.update_one(
                 {"_id": oid},
                 {"$set": {
@@ -516,9 +551,6 @@ class ChangeDeliveryDate(BaseTool):
                 }}
             )
 
-            # ── FIX: push to all connected CRM admin tabs immediately.
-            # Import here (not at module top) to avoid circular imports since
-            # ws_manager lives in the api layer.
             try:
                 from backend.api.websocket import ws_manager
                 await ws_manager.broadcast_to_admins({
@@ -527,7 +559,6 @@ class ChangeDeliveryDate(BaseTool):
                     "order_id":   order_id,
                 })
             except Exception as broadcast_err:
-                # Never let a failed broadcast block the tool response.
                 logger.warning(f"Admin broadcast failed: {broadcast_err}")
 
             return self.success({
@@ -707,7 +738,6 @@ class GetOrderTracking(BaseTool):
         except Exception:
             return self.error("Invalid order ID format.")
 
-        # Resolve user from email
         user = await self._db.users.find_one(
             {"email": {"$regex": f"^{email}$", "$options": "i"}},
             {"_id": 1}
@@ -715,16 +745,13 @@ class GetOrderTracking(BaseTool):
         if not user:
             return self.error(f"No account found for email: {email}")
 
-        # Fetch main order
         order = await self._db.orders.find_one({"_id": oid})
         if not order:
             return self.error(f"No order found with ID {order_id}.")
 
-        # Verify ownership
         if str(user["_id"]) != str(order.get("userId")):
             return self.error("This order does not belong to the provided email.")
 
-        # Enrich with invoice
         invoice = None
         if order.get("invoiceId"):
             try:
@@ -732,10 +759,8 @@ class GetOrderTracking(BaseTool):
             except Exception:
                 pass
 
-        # Check for return
         return_doc = await self._db.returns.find_one({"orderId": oid})
 
-        # Build clean tracking response
         tracking = {
             "order_id": str(order["_id"]),
             "status": order.get("status", "Unknown"),
@@ -814,7 +839,6 @@ class GetInvoiceDetails(BaseTool):
             return self.error("email is required.")
 
         try:
-            # Resolve user from email
             user = await self._db.users.find_one(
                 {"email": {"$regex": f"^{email}$", "$options": "i"}},
                 {"_id": 1}
@@ -822,7 +846,6 @@ class GetInvoiceDetails(BaseTool):
             if not user:
                 return self.error(f"No account found for email: {email}")
 
-            # Fetch order and verify ownership
             order = await self._db.orders.find_one({"_id": ObjectId(order_id)})
             if not order:
                 return self.error(f"No order found with ID {order_id}")
@@ -830,7 +853,6 @@ class GetInvoiceDetails(BaseTool):
             if str(user["_id"]) != str(order.get("userId")):
                 return self.error("This order does not belong to the provided email.")
 
-            # Fetch invoice via invoiceId on the order
             invoice = None
             if order.get("invoiceId"):
                 invoice = await self._db.invoices.find_one({"_id": ObjectId(order["invoiceId"])})
@@ -838,7 +860,6 @@ class GetInvoiceDetails(BaseTool):
             if not invoice:
                 return self.error("No invoice found for this order.")
 
-            # Extract relevant fields
             erp     = invoice.get("metadata", {}).get("erpDetails", {})
             card    = invoice.get("metadata", {}).get("creditCardProcessing", {})
             loyalty = invoice.get("metadata", {}).get("loyaltyRewards", {})
@@ -1006,10 +1027,259 @@ class GetTotalAmountPaid(BaseTool):
             logger.exception("get_total_amount_paid failed")
             return self.error(f"Failed to calculate total spending: {str(e)}")
 
+# ── 10. Initiate Return ──────────────────────────────────────────────────
+
+class InitiateReturn(BaseTool):
+    def __init__(self, db: AsyncIOMotorDatabase):
+        self._db = db
+ 
+    @property
+    def name(self) -> str:
+        return "initiate_return"
+ 
+    @property
+    def description(self) -> str:
+        return (
+            "Initiate a return request for a delivered order. "
+            "Checks return window eligibility (30 days standard, 45 days for Platinum members), "
+            "validates the order is in 'Delivered' status, and creates a pending return request "
+            "for admin approval. Once approved, the customer receives an RMA number. "
+            "Use when the customer asks to return an item, get a refund, or send something back. "
+            "If the customer hasn't specified which order, call get_order_history first. "
+            "IMPORTANT: Always confirm the return reason and preferred refund method "
+            "(original_payment / store_credit / bank_transfer) from the customer before calling this tool. "
+            "Also confirm which items they want to return if it is a multi-item order."
+        )
+ 
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "order_id": {
+                    "type": "string",
+                    "description": "The confirmed order ID from get_order_history"
+                },
+                "email": {
+                    "type": "string",
+                    "description": "The customer's email address"
+                },
+                "reason": {
+                    "type": "string",
+                    "enum": [
+                        "defective_damaged",
+                        "wrong_item_received",
+                        "not_as_described",
+                        "changed_mind",
+                        "size_fit_issue"
+                    ],
+                    "description": "The reason for the return"
+                },
+                "refund_method": {
+                    "type": "string",
+                    "enum": ["original_payment", "store_credit", "bank_transfer"],
+                    "description": "The customer's preferred refund method"
+                },
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of item names to return. "
+                        "Use the product names from the order. "
+                        "If all items are being returned, include all of them."
+                    )
+                }
+            },
+            "required": ["order_id", "email", "reason", "refund_method", "items"]
+        }
+ 
+    async def execute(self, **kwargs: Any) -> dict:
+        order_id      = kwargs.get("order_id", "").strip()
+        email         = kwargs.get("email", "").strip().lower()
+        reason        = kwargs.get("reason", "").strip()
+        refund_method = kwargs.get("refund_method", "").strip()
+        items         = kwargs.get("items", [])
+ 
+        if not order_id:
+            return self.error("order_id is required.")
+        if not email:
+            return self.error("email is required.")
+        if not reason:
+            return self.error("reason is required.")
+        if not refund_method:
+            return self.error("refund_method is required.")
+        if not items:
+            return self.error("At least one item must be specified for return.")
+ 
+        try:
+            oid = ObjectId(order_id)
+        except Exception:
+            return self.error(f"'{order_id}' is not a valid order ID.")
+ 
+        # ── Resolve user from email ──────────────────────────────────────────
+        user = await self._db.users.find_one(
+            {"email": {"$regex": f"^{email}$", "$options": "i"}},
+            {"_id": 1, "loyaltyTier": 1}
+        )
+        if not user:
+            return self.error(f"No account found for email: {email}")
+ 
+        # ── Fetch order ──────────────────────────────────────────────────────
+        try:
+            order = await self._db.orders.find_one(
+                {"_id": oid},
+                {
+                    "status": 1,
+                    "userId": 1,
+                    "products": 1,
+                    "estimated_destination_date": 1,
+                    "return_request": 1,
+                }
+            )
+        except Exception as e:
+            logger.exception(f"initiate_return order fetch failed for {order_id}")
+            return self.error(f"Failed to fetch order: {str(e)}")
+ 
+        if not order:
+            return self.error(f"No order found with ID {order_id}.")
+ 
+        # ── Verify ownership ─────────────────────────────────────────────────
+        if str(user["_id"]) != str(order.get("userId")):
+            return self.error("This order does not belong to the provided email.")
+ 
+        # ── Check order status ───────────────────────────────────────────────
+        status = order.get("status", "")
+        if status != "Delivered":
+            return self.success({
+                "outcome": "rejected",
+                "reason": (
+                    f"Your order is currently '{status}'. "
+                    "Returns can only be initiated after the order has been delivered."
+                ),
+                "current_status": status,
+            })
+ 
+        # ── Check return window ──────────────────────────────────────────────
+        loyalty_tier   = user.get("loyaltyTier", "Bronze")
+        return_window  = 45 if loyalty_tier == "Platinum" else 30
+ 
+        delivery_date = order.get("estimated_destination_date")
+        if not delivery_date:
+            return self.error(
+                "Order is missing delivery date — cannot evaluate return window."
+            )
+ 
+        if isinstance(delivery_date, datetime) and delivery_date.tzinfo is None:
+            delivery_date = delivery_date.replace(tzinfo=timezone.utc)
+ 
+        now = datetime.now(timezone.utc)
+        days_since_delivery = (now - delivery_date).days
+ 
+        if days_since_delivery > return_window:
+            return self.success({
+                "outcome": "rejected",
+                "reason": (
+                    f"Your return window has expired. "
+                    f"The order was delivered on {delivery_date.strftime('%B %d, %Y')} "
+                    f"({days_since_delivery} days ago). "
+                    f"{'Platinum members have' if loyalty_tier == 'Platinum' else 'Your'} "
+                    f"return window is {return_window} days."
+                ),
+                "delivered_on":   delivery_date.date().isoformat(),
+                "return_window":  return_window,
+                "days_elapsed":   days_since_delivery,
+            })
+ 
+        # ── Check for existing pending return request ────────────────────────
+        existing = order.get("return_request")
+        if existing and existing.get("status") == "pending":
+            return self.success({
+                "outcome": "already_pending",
+                "reason": (
+                    "There is already a pending return request for this order. "
+                    "Our team is reviewing it and will confirm within 24 hours. "
+                    "Please wait for that confirmation before submitting a new request."
+                ),
+                "request_id": existing.get("request_id"),
+            })
+ 
+        # ── Determine who covers return shipping ─────────────────────────────
+        leafy_covers = {"defective_damaged", "wrong_item_received", "not_as_described"}
+        return_shipping_covered_by = (
+            "leafy" if reason in leafy_covers else "customer"
+        )
+ 
+        # ── Insert into pending_requests ─────────────────────────────────────
+        now = datetime.now(timezone.utc)
+ 
+        pending_doc = {
+            "type":                        "return_request",
+            "status":                      "pending",
+            "order_id":                    oid,
+            "user_id":                     order.get("userId"),
+            "reason":                      reason,
+            "items":                       items,
+            "refund_method":               refund_method,
+            "return_shipping_covered_by":  return_shipping_covered_by,
+            "loyalty_tier":                loyalty_tier,
+            "delivery_date":               delivery_date,
+            "days_since_delivery":         days_since_delivery,
+            "created_at":                  now,
+            "resolved_at":                 None,
+            "resolved_by":                 None,
+            "resolution_note":             None,
+            "session_id":                  None,
+        }
+ 
+        result = await self._db.pending_requests.insert_one(pending_doc)
+        request_id = str(result.inserted_id)
+ 
+        # ── Mirror lightweight reference back to order ────────────────────────
+        await self._db.orders.update_one(
+            {"_id": oid},
+            {"$set": {
+                "return_request": {
+                    "request_id": request_id,
+                    "status":     "pending",
+                    "reason":     reason,
+                    "items":      items,
+                    "created_at": now,
+                }
+            }}
+        )
+ 
+        # ── Broadcast to all connected CRM admin tabs ─────────────────────────
+        try:
+            from backend.api.websocket import ws_manager
+            await ws_manager.broadcast_to_admins({
+                "type":       "new_request",
+                "request_id": request_id,
+                "order_id":   order_id,
+            })
+        except Exception as broadcast_err:
+            logger.warning(f"Admin broadcast failed: {broadcast_err}")
+ 
+        return self.success({
+            "outcome":    "pending_approval",
+            "request_id": request_id,
+            "message": (
+                "Your return request has been submitted and is pending approval. "
+                "Our team will review it within 24 hours and send you an RMA number "
+                "to ship the item(s) back. "
+                f"Return shipping will be covered by "
+                f"{'Leafy' if return_shipping_covered_by == 'leafy' else 'you (the customer)'}."
+            ),
+            "items":                      items,
+            "reason":                     reason,
+            "refund_method":              refund_method,
+            "return_shipping_covered_by": return_shipping_covered_by,
+        })
+
 # ── Registry ────────────────────────────────────────────────────────────────────
 
 def get_all_tools(db: AsyncIOMotorDatabase) -> list[BaseTool]:
     return [
+        ThinkTool(),                  # ← no-op reasoning tool, no DB needed
         GetOrderDetails(db),
         GetUserProfile(db),
         GetOrderHistory(db),
@@ -1019,4 +1289,5 @@ def get_all_tools(db: AsyncIOMotorDatabase) -> list[BaseTool]:
         GetOrderTracking(db),
         GetInvoiceDetails(db),
         GetTotalAmountPaid(db),
+        InitiateReturn(db),
     ]
