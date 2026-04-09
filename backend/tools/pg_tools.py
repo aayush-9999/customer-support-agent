@@ -7,6 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 import uuid
 from backend.tools.base import BaseTool
+import re
+import json
+from datetime import datetime, date, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -775,7 +778,7 @@ class ChangeDeliveryAddressPG(BaseTool):
                     return self.error(f"No order found with ID {order_id}.")
 
                 # ── 3. Check terminal states ─────────────────────────────────
-                status = order["order_status"]
+                status = order["order_status"].lower()
                 if status in ("delivered", "cancelled", "shipped"):
                     reason_map = {
                         "shipped":   (
@@ -1245,6 +1248,271 @@ class GetUserProfilePG(BaseTool):
         except Exception as e:
             logger.exception(f"get_user_profile failed for email={email}")
             return self.error(f"Failed to retrieve profile: {str(e)}")
+        
+# ── 6. Initiate Return ───────────────────────────────────────────────────────
+
+class InitiateReturnPG(BaseTool):
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+
+    @property
+    def name(self) -> str:
+        return "initiate_return"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Initiate a return for a delivered order. "
+            "DO NOT use for cancellations — use cancel_order for that. "
+            "Checks 30-day return window (45 days for Platinum members). "
+            "Before calling, confirm: return reason, refund method, and which items. "
+            "If customer hasn't specified order, call get_order_history first."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "email":         {"type": "string", "description": "Customer email"},
+                "order_id":      {"type": "string", "description": "Order ID confirmed by customer"},
+                "reason":        {
+                    "type": "string",
+                    "enum": [
+                        "defective_damaged",
+                        "wrong_item_received",
+                        "not_as_described",
+                        "changed_mind",
+                        "size_fit_issue"
+                    ],
+                    "description": "Return reason"
+                },
+                "refund_method": {
+                    "type": "string",
+                    "enum": ["original_payment", "store_credit", "bank_transfer"],
+                    "description": "Preferred refund method"
+                },
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Product names to return"
+                },
+            },
+            "required": ["email", "order_id", "reason", "refund_method", "items"]
+        }
+
+    async def execute(self, **kwargs: Any) -> dict:
+        email         = kwargs.get("email", "").strip().lower()
+        order_id      = kwargs.get("order_id", "").strip()
+        reason        = kwargs.get("reason", "").strip()
+        refund_method = kwargs.get("refund_method", "").strip()
+        items         = kwargs.get("items", [])
+
+        if not email:
+            return self.error("email is required.")
+        if not order_id:
+            return self.error("order_id is required.")
+        if not reason:
+            return self.error("reason is required.")
+        if not refund_method:
+            return self.error("refund_method is required.")
+        if not items:
+            return self.error("At least one item must be specified.")
+
+        try:
+            async with self._session_factory() as session:
+
+                # ── 1. Verify user ───────────────────────────────────────────
+                user_result = await session.execute(
+                    text("""
+                        SELECT id, loyalty_tier
+                        FROM users
+                        WHERE LOWER(email) = :email
+                    """),
+                    {"email": email}
+                )
+                user = user_result.mappings().first()
+                if not user:
+                    return self.error(f"No account found for email: {email}")
+
+                # ── 2. Verify order ownership ────────────────────────────────
+                customer_result = await session.execute(
+                    text("SELECT customer_id FROM customers WHERE LOWER(email) = :email"),
+                    {"email": email}
+                )
+                customer = customer_result.mappings().first()
+                if not customer:
+                    return self.error("No order history found for this account.")
+
+                order_result = await session.execute(
+                    text("""
+                        SELECT
+                            order_id,
+                            order_status,
+                            order_delivered_customer_date,
+                            order_estimated_delivery_date
+                        FROM orders
+                        WHERE order_id    = :order_id
+                          AND customer_id = :customer_id
+                    """),
+                    {"order_id": order_id, "customer_id": customer["customer_id"]}
+                )
+                order = order_result.mappings().first()
+                if not order:
+                    return self.error(f"No order found with ID {order_id}.")
+
+                # ── 3. Check order status ────────────────────────────────────
+                status = order["order_status"]
+                if status != "delivered":
+                    return self.success({
+                        "outcome": "rejected",
+                        "reason": (
+                            f"Your order is currently '{status}'. "
+                            "Returns can only be initiated after the order has been delivered."
+                        ),
+                        "current_status": status,
+                    })
+
+                # ── 4. Resolve delivery date ─────────────────────────────────
+                # Prefer actual delivery date, fall back to estimated
+                delivery_date = (
+                    order["order_delivered_customer_date"]
+                    or order["order_estimated_delivery_date"]
+                )
+                if not delivery_date:
+                    return self.error(
+                        "Order is missing delivery date — cannot evaluate return window."
+                    )
+
+                # Normalise to timezone-aware datetime
+                if isinstance(delivery_date, datetime):
+                    if delivery_date.tzinfo is None:
+                        delivery_date = delivery_date.replace(tzinfo=timezone.utc)
+                elif isinstance(delivery_date, date):
+                    delivery_date = datetime(
+                        delivery_date.year,
+                        delivery_date.month,
+                        delivery_date.day,
+                        tzinfo=timezone.utc
+                    )
+
+                # ── 5. Check return window ───────────────────────────────────
+                loyalty_tier  = user["loyalty_tier"] or "Bronze"
+                return_window = 45 if loyalty_tier == "Platinum" else 30
+                now           = datetime.now(timezone.utc)
+                days_elapsed  = (now - delivery_date).days
+
+                if days_elapsed > return_window:
+                    return self.success({
+                        "outcome": "rejected",
+                        "reason": (
+                            f"Your return window has expired. "
+                            f"The order was delivered on "
+                            f"{delivery_date.strftime('%B %d, %Y')} "
+                            f"({days_elapsed} days ago). "
+                            f"Return window is {return_window} days"
+                            f"{' for Platinum members' if loyalty_tier == 'Platinum' else ''}."
+                        ),
+                        "delivered_on":  delivery_date.date().isoformat(),
+                        "return_window": return_window,
+                        "days_elapsed":  days_elapsed,
+                    })
+
+                # ── 6. Check for existing pending return ─────────────────────
+                existing_result = await session.execute(
+                    text("""
+                        SELECT id FROM pending_requests
+                        WHERE order_id = :order_id
+                          AND type     = 'return_request'
+                          AND status   = 'pending'
+                        LIMIT 1
+                    """),
+                    {"order_id": order_id}
+                )
+                existing = existing_result.mappings().first()
+                if existing:
+                    return self.success({
+                        "outcome":    "already_pending",
+                        "reason":     (
+                            "There is already a pending return request for this order. "
+                            "Our team will confirm within 24 hours."
+                        ),
+                        "request_id": existing["id"],
+                    })
+
+                # ── 7. Determine return shipping responsibility ───────────────
+                leafy_covers = {
+                    "defective_damaged",
+                    "wrong_item_received",
+                    "not_as_described"
+                }
+                shipping_covered_by = (
+                    "leafy" if reason in leafy_covers else "customer"
+                )
+
+                # ── 8. Insert pending request ────────────────────────────────
+                request_id = str(uuid.uuid4())
+                now        = datetime.now(timezone.utc)
+
+                await session.execute(
+                    text("""
+                        INSERT INTO pending_requests (
+                            id, type, status, order_id, user_id,
+                            reason, items, refund_method,
+                            return_shipping_covered_by,
+                            session_id, created_at
+                        ) VALUES (
+                            :id, :type, :status, :order_id, :user_id,
+                            :reason, :items, :refund_method,
+                            :shipping_covered_by,
+                            NULL, :created_at
+                        )
+                    """),
+                    {
+                        "id":                   request_id,
+                        "type":                 "return_request",
+                        "status":               "pending",
+                        "order_id":             order_id,
+                        "user_id":              user["id"],
+                        "reason":               reason,
+                        "items":                json.dumps(items),
+                        "refund_method":        refund_method,
+                        "shipping_covered_by":  shipping_covered_by,
+                        "created_at":           now,
+                    }
+                )
+                await session.commit()
+
+                # ── 9. Broadcast to admin CRM ────────────────────────────────
+                try:
+                    from backend.api.websocket import ws_manager
+                    await ws_manager.broadcast_to_admins({
+                        "type":         "new_request",
+                        "request_id":   request_id,
+                        "order_id":     order_id,
+                        "request_type": "return_request",
+                    })
+                except Exception as broadcast_err:
+                    logger.warning(f"Admin broadcast failed: {broadcast_err}")
+
+                return self.success({
+                    "outcome":    "pending_approval",
+                    "request_id": request_id,
+                    "message": (
+                        "Your return request has been submitted and is pending approval. "
+                        "Our team will review it within 24 hours and send you an RMA number. "
+                        f"Return shipping will be covered by "
+                        f"{'Leafy' if shipping_covered_by == 'leafy' else 'you (the customer)'}."
+                    ),
+                    "items":                     items,
+                    "reason":                    reason,
+                    "refund_method":             refund_method,
+                    "return_shipping_covered_by": shipping_covered_by,
+                })
+
+        except Exception as e:
+            logger.exception(f"initiate_return failed for {order_id}")
+            return self.error(f"Failed to process return request: {str(e)}")
 
 def get_all_pg_tools(session_factory) -> list[BaseTool]:
     return [
@@ -1253,7 +1521,9 @@ def get_all_pg_tools(session_factory) -> list[BaseTool]:
         GetOrderDetailsPG(session_factory),
         GetOrderStatusPG(session_factory),
         ChangeDeliveryDatePG(session_factory),
+        ChangeDeliveryAddressPG(session_factory),
         GetPaymentInfoPG(session_factory),
         GetSellerInfoPG(session_factory),
-        GetUserProfilePG(session_factory),  # ← add
-    ]
+        GetUserProfilePG(session_factory), 
+        InitiateReturnPG(session_factory),
+    ]   

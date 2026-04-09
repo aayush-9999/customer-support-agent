@@ -114,7 +114,7 @@ async def chat(
         #      get_pg_session()` which creates an unmanaged session outside DI.
 
         pending_tool_called = any(
-        tc.tool_name in ("change_delivery_date", "change_delivery_address")
+        tc.tool_name in ("change_delivery_date", "change_delivery_address", "initiate_return")
         for tc in response.tool_calls
     )
 
@@ -130,7 +130,7 @@ async def chat(
                             WHERE user_id    = :user_id
                             AND status     = 'pending'
                             AND session_id IS NULL
-                            AND type       IN ('date_change', 'address_change')
+                            AND type       IN ('date_change', 'address_change','return_request')
                             ORDER BY created_at DESC
                             LIMIT 1
                         )
