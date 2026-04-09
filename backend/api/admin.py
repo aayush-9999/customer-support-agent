@@ -1,5 +1,6 @@
 # backend/api/admin.py
 
+import json
 import logging
 from datetime import datetime, date, timezone
 from fastapi import APIRouter, Depends, HTTPException
@@ -82,6 +83,10 @@ async def _pg_get_pending_requests(status: str, session: AsyncSession) -> list[d
                 pr.current_city,
                 pr.current_state,
                 pr.current_pincode,
+                pr.reason,
+                pr.items,
+                pr.refund_method,
+                pr.return_shipping_covered_by,
 
                 o.order_status,
                 o.order_estimated_delivery_date,
@@ -138,6 +143,10 @@ async def _pg_get_pending_requests(status: str, session: AsyncSession) -> list[d
             "current_city":      row["current_city"],
             "current_state":     row["current_state"],
             "current_pincode":   row["current_pincode"],
+            "reason":                      row["reason"],
+            "items":                       json.loads(row["items"]) if row["items"] else [],
+            "refund_method":               row["refund_method"],
+            "return_shipping_covered_by":  row["return_shipping_covered_by"],
             "order": {
                 "status":           row["order_status"],
                 "current_delivery": str(row["order_estimated_delivery_date"]) if row["order_estimated_delivery_date"] else None,
@@ -233,6 +242,23 @@ async def _pg_approve_request(
             f"Your new delivery address is {new_address}."
         )
 
+    elif req["type"] == "return_request":
+        items = json.loads(req["items"]) if req["items"] else []
+        items_str = ", ".join(items) if items else "your items"
+
+        # Generate a simple RMA number from the request_id
+        rma_number = f"RMA-{request_id[:8].upper()}"
+
+        approval_message = (
+            f"Great news! Your return request has been approved. "
+            f"Your RMA number is {rma_number}. "
+            f"Please include this number on your return package. "
+            f"Return shipping will be covered by "
+            f"{'Leafy' if req['return_shipping_covered_by'] == 'leafy' else 'you (the customer)'}. "
+            f"Your refund via {req['refund_method'].replace('_', ' ')} "
+            f"will be processed within 5–7 business days of receiving the return."
+        )
+
     else:
         # Fallback for any future request types
         approval_message = "Your request has been approved."
@@ -296,6 +322,12 @@ async def _pg_reject_request(
         rejection_message = (
         "Unfortunately your delivery address change request could not be approved. "
         f"Reason: {note or 'No reason provided'}."
+    )
+    elif req["type"] == "return_request":
+        rejection_message = (
+        "Unfortunately your return request could not be approved. "
+        f"Reason: {note or 'No reason provided'}. "
+        "If you have further questions please contact our support team."
     )
     else:
         rejection_message = (
