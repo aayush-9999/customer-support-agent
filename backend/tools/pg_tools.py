@@ -1,5 +1,5 @@
 # backend/tools/pg_tools.py
-
+import re
 import logging
 from typing import Any
 from sqlalchemy import text
@@ -775,7 +775,7 @@ class ChangeDeliveryAddressPG(BaseTool):
                     return self.error(f"No order found with ID {order_id}.")
 
                 # ── 3. Check terminal states ─────────────────────────────────
-                status = order["order_status"]
+                status = order["order_status"].lower()
                 if status in ("delivered", "cancelled", "shipped"):
                     reason_map = {
                         "shipped":   (
@@ -1253,6 +1253,7 @@ def get_all_pg_tools(session_factory) -> list[BaseTool]:
         GetOrderDetailsPG(session_factory),
         GetOrderStatusPG(session_factory),
         ChangeDeliveryDatePG(session_factory),
+        ChangeDeliveryAddressPG(session_factory),
         GetPaymentInfoPG(session_factory),
         GetSellerInfoPG(session_factory),
         GetUserProfilePG(session_factory),  # ← add
