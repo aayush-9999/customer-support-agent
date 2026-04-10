@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     # ── Groq ───────────────────────────────────────────────────────────────
     groq_api_key: str = Field(..., description="Groq API key — required")
-    groq_model: str = Field(default="moonshotai/kimi-k2-instruct")
+    groq_model: str = Field(default="meta-llama/llama-4-scout-17b-16e-instruct")
     groq_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     groq_max_tokens: int = Field(default=1024, gt=0)
     groq_timeout_seconds: int = Field(default=30, gt=0)
@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     postgres_max_connections: int        = Field(default=10)
 
     # ── Agent ──────────────────────────────────────────────────────────────
-    agent_max_iterations: int = Field(default=10, gt=0, le=25)
+    agent_max_iterations: int = Field(default=6, gt=0, le=25)
     agent_system_prompt_path: str = Field(
         default="knowledge/brand/voice.md"
     )
