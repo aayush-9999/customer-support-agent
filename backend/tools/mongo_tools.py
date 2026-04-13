@@ -2,6 +2,7 @@
 
 import logging
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any
 import re
 
@@ -62,8 +63,14 @@ class ThinkTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Reason through a problem before acting. Call BEFORE any data-fetching "
-            "or mutation tool. No side effects — just records your reasoning."
+            "A private reasoning scratchpad. Call this ALONE and FIRST before any "
+            "data tool or action tool. Use it to answer: "
+            "(1) What exactly is the customer asking? "
+            "(2) What data do I already have in conversation history — do I need to fetch anything? "
+            "(3) What is the single correct next step? "
+            "Output is never shown to the customer. "
+            "Do NOT call think at the same time as any other tool. "
+            "Do NOT call think a second time in the same reasoning chain unless you received new data."
         )
 
     @property
@@ -109,9 +116,15 @@ class GetOrderDetails(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Get full details for one specific order by order_id: status, products, "
-            "shipping address, estimated dates, and date-change requests. "
-            "Only call AFTER the customer has confirmed which order. Never guess the order_id."
+            "Fetch full details for one specific order by order_id: product list, status, "
+            "shipping address, estimated_warehouse_date, estimated_destination_date, "
+            "date-change requests, and return requests on the order. "
+            "Use when you need order data to answer a question, OR when computing "
+            "the earliest possible delivery date for a date-change request "
+            "(read estimated_warehouse_date, add 1 day). "
+            "PREREQUISITE: you must have a confirmed order_id from the customer or from get_order_history. "
+            "IMPORTANT: Do NOT re-fetch if order details are already visible in conversation history — "
+            "reuse the data that's already there."
         )
 
     @property
@@ -184,8 +197,12 @@ class GetUserProfile(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Get a customer's profile by email: name, account status, loyalty tier, "
-            "and points. Use when the customer asks about their account."
+            "Fetch a customer's account profile: name, email, loyalty tier, "
+            "loyalty points balance, and account status (active / suspended / banned). "
+            "Use when the customer asks about their points balance, tier, account standing, "
+            "or personal details. "
+            "PREREQUISITE: you must have the customer's email address. "
+            "Do NOT call this to look up order data — use get_order_history or get_order_details instead."
         )
 
     @property
@@ -234,9 +251,15 @@ class GetOrderHistory(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "List all recent orders for a customer by email: order_id, status, item names, dates. "
-            "Call first whenever a customer asks about 'my order' without specifying which one. "
-            "If multiple orders exist, show the list and ask which one before calling get_order_details."
+            "List all recent orders for a customer by email: order_id, status, "
+            "item names, and estimated delivery dates. "
+            "Call first whenever a customer asks about 'my order' without specifying which one, "
+            "or when you need an order_id and don't have one yet. "
+            "If multiple orders exist, show the list and ask the customer to pick one "
+            "BEFORE calling get_order_details or any action tool. "
+            "If only one order exists, proceed to get_order_details directly. "
+            "PREREQUISITE: you must have the customer's email address. "
+            "Do NOT call this if order history was already fetched this session — use what's in history."
         )
 
     @property
@@ -341,8 +364,13 @@ class GetReturnStatus(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Get the return/refund status for a specific order by order_id. "
-            "Use when the customer asks about a return or refund."
+            "Check the status of an existing return request for a specific order by order_id. "
+            "Returns: return status (pending / approved / rejected), submission date, items, "
+            "refund method, and any admin resolution notes. "
+            "Use when the customer asks 'what happened to my return', 'has my return been approved', "
+            "or 'where is my refund'. "
+            "PREREQUISITE: you must have a confirmed order_id. "
+            "If order_id is not known, call get_order_history first."
         )
 
     @property
@@ -393,10 +421,27 @@ class ChangeDeliveryDate(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Request a delivery date change for an order. "
-            "If the customer says 'sooner' or gives no date, call get_order_details first, "
-            "read estimated_warehouse_date, compute earliest = warehouse_date + 1 day, "
-            "tell the customer, and wait for confirmation before calling this."
+            "Submit a request to change the estimated delivery date of an order. "
+            "Creates a PENDING APPROVAL request — the date is NOT instantly changed. "
+            "\n\n"
+            "PREREQUISITES — do NOT call this tool until ALL of the following are true:\n"
+            "  1. You have a confirmed order_id.\n"
+            "  2. You have a specific date the customer has explicitly confirmed they want.\n"
+            "\n"
+            "CRITICAL — IF THE CUSTOMER SAID 'sooner', 'earlier', 'as soon as possible', "
+            "or gave NO specific date:\n"
+            "  → Do NOT call this tool yet and do NOT ask the customer for a date "
+            "(they cannot know what dates are possible).\n"
+            "  → call get_order_details first and read 'estimated_warehouse_date'.\n"
+            "  → Compute: earliest_possible = warehouse_date + 1 calendar day.\n"
+            "  → Tell the customer: 'The earliest I can request is [date]. "
+            "Shall I submit that for you?'\n"
+            "  → Wait for a yes/no. Only call this tool after they confirm.\n"
+            "\n"
+            "OUTCOMES this tool returns:\n"
+            "  pending_approval → request submitted, admin reviews within 24 hours\n"
+            "  rejected         → not eligible; reason and earliest_possible in result\n"
+            "  already_pending  → an existing request is under review, cannot create another"
         )
 
     @property
@@ -425,7 +470,7 @@ class ChangeDeliveryDate(BaseTool):
 
         try:
             req_dt = datetime.strptime(requested_date, "%Y-%m-%d").replace(
-                tzinfo=timezone.utc
+                tzinfo=ZoneInfo("Asia/Kolkata")
             )
         except ValueError:
             return self.error(
@@ -471,7 +516,7 @@ class ChangeDeliveryDate(BaseTool):
                 )
 
             if isinstance(warehouse_dt, datetime) and warehouse_dt.tzinfo is None:
-                warehouse_dt = warehouse_dt.replace(tzinfo=timezone.utc)
+                warehouse_dt = warehouse_dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
 
             if req_dt < warehouse_dt:
                 return self.success({
@@ -579,7 +624,19 @@ class ChangeDeliveryAddress(BaseTool):
     def description(self) -> str:
         return (
             "Change the delivery address on an order. "
-            "Only possible before the order is shipped (status: In process / Ready for delivery)."
+            "Only possible while the order is in 'In process' or 'Ready for delivery' status. "
+            "Once shipped, the address cannot be changed. "
+            "\n\n"
+            "PREREQUISITES — do NOT call this tool until ALL of the following are confirmed:\n"
+            "  1. You have a confirmed order_id.\n"
+            "  2. You have the COMPLETE new address from the customer — all of: "
+            "street_and_number, city, country. Postcode (cp) is strongly recommended. "
+            "If any field is missing, ask for all missing fields in a single message first.\n"
+            "  3. The customer has confirmed the address is correct.\n"
+            "\n"
+            "OUTCOMES this tool returns:\n"
+            "  updated  → address successfully changed\n"
+            "  rejected → order status does not allow address changes (already shipped)"
         )
 
     @property
@@ -684,9 +741,13 @@ class GetOrderTracking(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Full tracking info for one order: status, estimated dates, products, shipping address, "
-            "date-change requests, and status history. "
-            "Use when the customer asks 'where is my order', 'track my package', or 'when will it arrive'."
+            "Get complete live tracking info for one order: current status, all estimated dates "
+            "(warehouse, shipped, destination), shipping address, product list, "
+            "any pending date-change requests, and full status history. "
+            "Use when the customer asks 'where is my order', 'track my package', "
+            "'when will it arrive', or 'what is the status of my order'. "
+            "PREREQUISITES: you must have (1) a confirmed order_id AND (2) the customer's email. "
+            "If order_id is not known, call get_order_history first."
         )
 
     @property
@@ -785,9 +846,12 @@ class GetInvoiceDetails(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Invoice and payment details for one specific order: total paid, tax, due date, "
-            "invoice number, transaction ID, and loyalty points earned. "
-            "Use when the customer asks about their invoice, payment amount, or tax."
+            "Fetch invoice and payment details for one specific order: total paid, subtotal, "
+            "tax, invoice number, due date, transaction ID, approval code, and loyalty points earned. "
+            "Use when the customer asks about their invoice, receipt, payment amount, tax, "
+            "or transaction details. "
+            "PREREQUISITES: you must have (1) a confirmed order_id AND (2) the customer's email. "
+            "If order_id is not known, call get_order_history first."
         )
 
     @property
@@ -880,9 +944,13 @@ class GetTotalAmountPaid(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Total lifetime spending across ALL orders: grand total, order count, average, "
-            "highest/lowest order, and date range. "
-            "Use when the customer asks how much they have spent in total."
+            "Get total lifetime spending summary across ALL orders for a customer: "
+            "grand total paid, total order count, average order value, "
+            "highest and lowest single order, and date range of purchases. "
+            "Use ONLY when the customer asks how much they have spent in total, "
+            "or asks for a spending summary across all their orders. "
+            "Do NOT use for single-order questions — use get_invoice_details instead. "
+            "PREREQUISITE: you must have the customer's email address."
         )
 
     @property
@@ -1015,9 +1083,27 @@ class InitiateReturn(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Initiate a return for a delivered order. Checks 30-day window (45 days for Platinum). "
-            "Requires confirmed order_id, reason, refund method, and item list before calling. "
-            "Use when the customer asks to return an item or get a refund."
+            "Submit a return request for a delivered order. "
+            "Checks the return window (30 days standard, 45 days for Platinum members). "
+            "Creates a PENDING APPROVAL request — the return is NOT instantly approved. "
+            "\n\n"
+            "PREREQUISITES — do NOT call this tool until ALL of the following are confirmed:\n"
+            "  1. You have a confirmed order_id.\n"
+            "  2. The order status is 'Delivered' (verify from order details in history).\n"
+            "  3. You know which item(s) the customer wants to return — use exact product names "
+            "from the order.\n"
+            "  4. You have a return reason — must be one of: defective_damaged, "
+            "wrong_item_received, not_as_described, changed_mind, size_fit_issue.\n"
+            "  5. You have the customer's preferred refund method: "
+            "original_payment, store_credit, or bank_transfer.\n"
+            "\n"
+            "If ANY of items 3, 4, or 5 are missing, ask for ALL missing ones in a "
+            "SINGLE message before calling this tool. Never call with guessed values.\n"
+            "\n"
+            "OUTCOMES this tool returns:\n"
+            "  pending_approval → submitted, admin reviews within 24 hours\n"
+            "  rejected         → order not delivered or outside return window (see reason)\n"
+            "  already_pending  → a return request is already under review"
         )
  
     @property
@@ -1139,7 +1225,7 @@ class InitiateReturn(BaseTool):
             )
  
         if isinstance(delivery_date, datetime) and delivery_date.tzinfo is None:
-            delivery_date = delivery_date.replace(tzinfo=timezone.utc)
+            delivery_date = delivery_date.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
  
         now = datetime.now(timezone.utc)
         days_since_delivery = (now - delivery_date).days
@@ -1257,14 +1343,27 @@ class ChangeOrderItem(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Change the size or colour of an item in a confirmed order. "
-            "For orders in 'Processing' or 'In process' status, checks stock in the "
-            "products table and creates a pending approval request if available. "
-            "For any other active status, checks warehouse stock and creates a pending "
-            "approval request if available. "
-            "In both cases the request always goes to admin for approval — nothing is changed directly. "
-            "If the customer hasn't specified which order, call get_order_history first. "
-            "Always confirm the new size and/or colour with the customer before calling this tool."
+            "Submit a request to change the size and/or colour of an item in an order. "
+            "For 'Processing'/'In process' orders: checks product catalogue stock. "
+            "For other active statuses: checks warehouse stock. "
+            "In both cases the request goes to admin for approval — nothing is changed instantly. "
+            "\n\n"
+            "PREREQUISITES — do NOT call this tool until ALL of the following are confirmed:\n"
+            "  1. You have a confirmed order_id.\n"
+            "  2. You have the exact item name as it appears in the order.\n"
+            "  3. You have the desired size (if changing) AND/OR desired colour (if changing). "
+            "If the customer mentioned only one (e.g. only size, not colour), ask for "
+            "the other in the same message before proceeding.\n"
+            "  4. The customer has explicitly confirmed the full change "
+            "(e.g. 'Yes, change to size M in red').\n"
+            "\n"
+            "Do NOT call with partial info. Collect everything in one message if needed.\n"
+            "\n"
+            "OUTCOMES this tool returns:\n"
+            "  pending_approval → stock confirmed, request sent for admin review\n"
+            "  out_of_stock     → requested variant not available in stock\n"
+            "  rejected         → order status or variant does not allow the change\n"
+            "  already_pending  → an item change request is already under review"
         )
 
     @property
@@ -1556,18 +1655,27 @@ class CancelOrder(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Cancel a customer's order following Leafy's official Cancellation Policy. "
-            "Cancellation is **ONLY allowed** when the order status is 'Processing' or 'In process'. "
-            "If the order is Shipped, In Transit, Out for Delivery, Delivered, or already Cancelled, "
-            "cancellation is not possible — the tool will reject it and explain why. "
-            "On successful cancellation, a full refund including original shipping cost will be issued "
-            "to the original payment method (3–5 business days) or as store credit (instant). "
-            
-            "Important instructions for the agent:\n"
-            "- If the customer says 'cancel my order' without specifying which one, "
-            "first call get_order_history to list their recent orders, then ask which one they want to cancel.\n"
-            "- Always confirm the correct order with the customer before calling this tool.\n"
-            "- You may ask for a reason, but it is optional."
+            "Cancel a customer's order. Cancellation is ONLY possible when the order "
+            "status is 'Processing' or 'In process'. "
+            "If the order is Shipped, In Transit, Out for Delivery, Delivered, or "
+            "already Cancelled, cancellation is not possible — advise the customer to "
+            "wait for delivery and then initiate a return instead. "
+            "On successful cancellation, a full refund including original shipping cost "
+            "is issued to the original payment method within 3–5 business days. "
+            "\n\n"
+            "PREREQUISITES — do NOT call this tool until ALL of the following are confirmed:\n"
+            "  1. You have a confirmed order_id. If not known, call get_order_history first.\n"
+            "  2. The customer has explicitly confirmed they want to cancel this order "
+            "(do not cancel without confirmation — it is irreversible).\n"
+            "  3. You have verified the order is in 'Processing' or 'In process' status "
+            "from order details in history.\n"
+            "\n"
+            "Reason is optional — you may ask but do not block on it.\n"
+            "\n"
+            "OUTCOMES this tool returns:\n"
+            "  success           → order cancelled, refund initiated\n"
+            "  rejected          → order not in a cancellable status\n"
+            "  already_cancelled → order was already cancelled"
         )
 
     @property

@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from sqlalchemy import String, Boolean, Integer, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 from backend.models.base import Base

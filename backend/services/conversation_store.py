@@ -3,6 +3,7 @@
 import json
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -184,33 +185,32 @@ class ConversationStore:
         tool_calls:   list,
         tool_results: list,
     ) -> None:
-        now = datetime.now(timezone.utc)
+        def _now():
+            return datetime.now(timezone.utc)
 
         # Build the ordered message sequence for this turn.
         messages_to_add = [
-            {"role": "user", "content": user_message, "timestamp": now}
+            {"role": "user", "content": user_message, "timestamp": _now()}
         ]
 
         if tool_calls:
             # ── Step 2: Encode the assistant's tool call decision ──────────────
-            # groq_service._build_messages() will decode this back into a proper
-            # Groq "assistant + tool_calls" message on the next turn.
             tc_payload = [
                 {
                     "id":        tc.id,
                     "name":      tc.tool_name,
-                    "arguments": tc.arguments,   # dict, not string
+                    "arguments": tc.arguments,
                 }
                 for tc in tool_calls
             ]
+
             messages_to_add.append({
                 "role":      "assistant",
                 "content":   f"{_TOOL_CALLS_MARKER}{json.dumps(tc_payload)}",
-                "timestamp": now,
+                "timestamp": _now(),
             })
 
             # ── Step 3: One tool-result message per tool call ──────────────────
-            # Build a lookup so we can attach the tool name to each result.
             tc_id_to_name = {tc.id: tc.tool_name for tc in tool_calls}
 
             for tr in tool_results:
@@ -220,24 +220,24 @@ class ConversationStore:
                     "content":      _slim_tool_result(tool_nm, tr.content),
                     "tool_call_id": tr.tool_call_id,
                     "name":         tool_nm,
-                    "timestamp":    now,
+                    "timestamp":    _now(),
                 })
 
         # ── Step 4: Final assistant text reply ────────────────────────────────
         messages_to_add.append({
             "role":      "assistant",
             "content":   bot_reply,
-            "timestamp": now,
+            "timestamp": _now(),
         })
 
         await self._db.conversations.update_one(
             {"session_id": session_id},
             {
                 "$push": {"messages": {"$each": messages_to_add}},
-                "$set":  {"last_active": now, "status": "active"},
+                "$set":  {"last_active": _now(), "status": "active"},
             }
         )
-
+        
     async def _mongo_append_notification(self, session_id, message, status):
         now = datetime.now(timezone.utc)
         await self._db.conversations.update_one(

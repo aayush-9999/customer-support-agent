@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     postgres_max_connections: int        = Field(default=10)
 
     # ── Agent ──────────────────────────────────────────────────────────────
-    agent_max_iterations: int = Field(default=6, gt=0, le=25)
+    agent_max_iterations: int = Field(default=10, gt=0, le=25)
     agent_system_prompt_path: str = Field(
         default="knowledge/brand/voice.md"
     )

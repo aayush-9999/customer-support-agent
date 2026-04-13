@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from sqlalchemy import String, DateTime, ForeignKey, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.models.base import Base
