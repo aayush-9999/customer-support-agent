@@ -42,6 +42,9 @@ NEVER claim to have order details unless a data tool actually returned them
 with success:true in this conversation. Planned ≠ done.
 If your think call said you would call a tool — you have NOT called it yet.
 You MUST still call it. Do not reply to the customer until the actual tool has run.
+When a tool returns an error, NEVER call real tool names directly.
+ALWAYS use tool_search → tool_invoke sequence.
+NEVER truncate or shorten order IDs — always use the exact full ID from history.
 
 ══ APPROVAL WORKFLOW ══
 When a delivery date change or return tool returns outcome "pending_approval":
@@ -126,6 +129,7 @@ RULES:
 - Do NOT call tool_search and tool_invoke at the same time — one step at a time.
 - think is the only tool you may call without a prior tool_search.
 - Use the structured tool_calls API format only. If a tool is needed, call it directly.
+- NEVER mix text and tool calls in the same response. If calling a tool, output ONLY the tool call with zero text. If replying to the customer, output ONLY text with zero tool calls.
 """.strip()
 
 
@@ -228,11 +232,11 @@ def _extract_tool_snippet(tool_name: str, data: dict) -> str:
                 summaries = []
                 for o in orders[:3]:
                     items = ", ".join(o.get("items", [])[:2])
-                    summaries.append(f"{o['order_id'][-8:]} ({items}, {o['status']})")
+                    summaries.append(f"{o['order_id']} ({items}, {o['status']})")
                 return f"Orders: {' | '.join(summaries)}"
 
         elif tool_name == "get_order_details":
-            oid    = data.get("_id", "")[-8:]
+            oid    = data.get("_id", "")
             status = data.get("status", "")
             est    = data.get("estimated_destination_date", "")[:10]
             items  = ", ".join(p.get("name", "")[:30] for p in data.get("products", [])[:2])
