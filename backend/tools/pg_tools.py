@@ -1457,7 +1457,7 @@ class InitiateReturnPG(BaseTool):
         reason        = kwargs.get("reason", "").strip()
         refund_method = kwargs.get("refund_method", "").strip()
         items         = kwargs.get("items", [])
-
+        session_id     = kwargs.get("session_id")
         if not email:
             return self.error("email is required.")
         if not order_id:
@@ -1615,6 +1615,7 @@ class InitiateReturnPG(BaseTool):
                         "refund_method":       refund_method,
                         "shipping_covered_by": shipping_covered_by,
                         "created_at":          now,
+                        "session_id":          session_id
                     }
                 )
                 await session.commit()
@@ -1695,6 +1696,7 @@ class ReportMissingItemPG(BaseTool):
         order_id          = kwargs.get("order_id", "").strip()
         missing_items     = kwargs.get("missing_items", [])
         package_condition = kwargs.get("package_condition", "").strip()
+        session_id           = kwargs.get("session_id")
 
         # ── Input validation ─────────────────────────────────────────────────
         if not email:
@@ -1823,7 +1825,7 @@ class ReportMissingItemPG(BaseTool):
                         ) VALUES (
                             :id, :type, :status, :order_id, :user_id,
                             :reported_items, :package_condition,
-                            :resolution_type, NULL, :created_at
+                            :resolution_type, :session_id, :created_at
                         )
                     """),
                     {
@@ -1835,6 +1837,7 @@ class ReportMissingItemPG(BaseTool):
                         "reported_items":   json.dumps(missing_items),
                         "package_condition": package_condition,
                         "resolution_type":  resolution_hint,
+                        "session_id":      session_id,
                         "created_at":       now,
                     }
                 )
