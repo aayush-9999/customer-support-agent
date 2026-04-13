@@ -600,7 +600,7 @@ class ChangeDeliveryDatePG(BaseTool):
                         "order_id":                order_id,
                     })
 
-                now        = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 request_id = str(uuid.uuid4())
 
                 await session.execute(
