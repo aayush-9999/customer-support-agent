@@ -2500,6 +2500,7 @@ class EscalateToHumanPG(BaseTool):
         except Exception as e:
             logger.exception(f"escalate_to_human failed for {email}")
             return self.error(f"Failed to create escalation: {str(e)}")
+        
 class ReorderLastOrderPG(BaseTool):
     """Recreates customer's last delivered order with current prices and stock validation."""
  
@@ -2521,19 +2522,23 @@ class ReorderLastOrderPG(BaseTool):
     @property
     def parameters(self) -> dict:
         return {
-            "type": "object",
-            "properties": {"email": {"type": "string", "description": "Customer email"}},
-            "required": ["email"]
+        "type": "object",
+        "properties": {
+            "email":    {"type": "string", "description": "Customer email"},
+            "order_id": {"type": "string", "description": "Specific order ID to reorder (optional — omit to use last delivered order)"},
+        },
+        "required": ["email"]
         }
  
     async def execute(self, **kwargs: Any) -> dict:
-        email = kwargs.get("email", "").strip().lower()
+        email    = kwargs.get("email", "").strip().lower()
+        order_id = kwargs.get("order_id", "").strip() or None  # optional — user can specify which order to reorder
         if not email:
             return self.error("email required")
- 
+
         try:
             async with self._session_factory() as session:
- 
+
                 # Verify customer and get address
                 result = await session.execute(
                     text("""
@@ -2548,70 +2553,83 @@ class ReorderLastOrderPG(BaseTool):
                 customer = result.mappings().first()
                 if not customer:
                     return self.error(f"No account found: {email}")
- 
+
                 customer_id = customer["customer_id"]
- 
-                # Get last completed order
-                order_result = await session.execute(
-                    text("""
-                        SELECT order_id
-                        FROM orders
-                        WHERE customer_id = :cid
-                          AND LOWER(order_status) IN ('delivered', 'completed')
-                        ORDER BY order_purchase_timestamp DESC
-                        LIMIT 1
-                    """),
-                    {"cid": customer_id}
-                )
+
+                # Get source order — use specified order_id if provided, else last delivered
+                if order_id:
+                    order_result = await session.execute(
+                        text("""
+                            SELECT order_id
+                            FROM orders
+                            WHERE customer_id = :cid
+                            AND order_id = :oid
+                            AND LOWER(order_status) IN ('delivered', 'completed')
+                            LIMIT 1
+                        """),
+                        {"cid": customer_id, "oid": order_id}
+                    )
+                else:
+                    order_result = await session.execute(
+                        text("""
+                            SELECT order_id
+                            FROM orders
+                            WHERE customer_id = :cid
+                            AND LOWER(order_status) IN ('delivered', 'completed')
+                            ORDER BY order_purchase_timestamp DESC
+                            LIMIT 1
+                        """),
+                        {"cid": customer_id}
+                    )
+
                 src = order_result.mappings().first()
                 if not src:
                     return self.success({
                         "outcome": "no_orders",
-                        "message": "No completed orders to reorder."
+                        "message": "No completed orders found to reorder."
                     })
- 
+
                 src_id = src["order_id"]
- 
-                # Get items + validate products + check stock
+
+                # Get items from order_items (use order item price, not product price)
                 items_result = await session.execute(
                     text("""
-                        SELECT oi.product_id, oi.seller_id, oi.freight_value,
-                               p.product_name, p.product_price, p.stock_quantity
+                        SELECT oi.product_id, oi.seller_id,
+                            oi.price, oi.freight_value,
+                            p.product_name, p.stock_quantity
                         FROM order_items oi
                         JOIN products p ON oi.product_id = p.product_id
                         WHERE oi.order_id = :oid
-                          AND p.stock_quantity > 0
+                        AND p.stock_quantity > 0
                     """),
                     {"oid": src_id}
                 )
                 items = items_result.mappings().all()
- 
+
                 if not items:
                     return self.success({
                         "outcome": "unavailable",
                         "message": "Items from your previous order are out of stock."
                     })
- 
-                # Calculate totals
-                subtotal = sum(float(i["product_price"]) for i in items)
-                shipping = sum(float(i["freight_value"] or 0) for i in items)
-                total = subtotal + shipping
- 
-                # Create order
+
+                # Calculate totals using order_items price + freight (not product_price)
+                total = sum(float(i["price"]) + float(i["freight_value"] or 0) for i in items)
+
+                # Create new order
                 new_id = str(uuid.uuid4())
-                now = datetime.now(timezone.utc)
-                eta = now + timedelta(days=7)
- 
+                now    = datetime.utcnow()
+                eta    = now + timedelta(days=7)
+
                 await session.execute(
                     text("""
                         INSERT INTO orders (
                             order_id, customer_id, order_status,
                             delivery_full_address,
-                            order_purchase_timestamp, order_estimated_delivery_date, reorder_source_id
+                            order_purchase_timestamp, order_estimated_delivery_date,
+                            reorder_source_id
                         ) VALUES (
                             :oid, :cid, 'Processing',
-                            :addr,
-                            :ts, :eta, :src
+                            :addr, :ts, :eta, :src
                         )
                     """),
                     {
@@ -2620,63 +2638,70 @@ class ReorderLastOrderPG(BaseTool):
                         "ts": now, "eta": eta, "src": src_id
                     }
                 )
- 
+
                 # Insert items + decrement stock
                 for item in items:
+                    max_id_result = await session.execute(
+                        text("SELECT COALESCE(MAX(order_item_id), 0) FROM order_items")
+                    )
+                    next_item_id = max_id_result.scalar() + 1
+
                     await session.execute(
                         text("""
-                            INSERT INTO order_items (order_item_id, order_id, product_id, seller_id, price, freight_value)
-                            VALUES (:iid, :oid, :pid, :sid, :price, :freight)
+                            INSERT INTO order_items (
+                                order_item_id, order_id, product_id, seller_id,
+                                price, freight_value
+                            ) VALUES (
+                                :iid, :oid, :pid, :sid, :price, :freight
+                            )
                         """),
                         {
-                            "iid": str(uuid.uuid4()), "oid": new_id,
-                            "pid": item["product_id"], "sid": item["seller_id"],
-                            "price": item["product_price"], "freight": item["freight_value"]
+                            "iid":    next_item_id,
+                            "oid":    new_id,
+                            "pid":    item["product_id"],
+                            "sid":    item["seller_id"],
+                            "price":  item["price"],          # from order_items, not products
+                            "freight": item["freight_value"],
                         }
                     )
-                    
-                    # Decrement stock
+
                     await session.execute(
                         text("UPDATE products SET stock_quantity = stock_quantity - 1 WHERE product_id = :pid"),
                         {"pid": item["product_id"]}
                     )
- 
-                # Get payment type from original order
-                payment_result = await session.execute(
-                    text("SELECT payment_type FROM order_payments WHERE order_id = :oid LIMIT 1"),
-                    {"oid": src_id}
-                )
-                payment = payment_result.mappings().first()
-                payment_type = payment["payment_type"] if payment else "credit_card"
- 
-                # Insert payment
+
+                # Always use cash_on_delivery for reorders
                 await session.execute(
-                    text("INSERT INTO order_payments (order_id, payment_type, payment_value) VALUES (:oid, :type, :val)"),
-                    {"oid": new_id, "type": payment_type, "val": total}
+                    text("""
+                        INSERT INTO order_payments (order_id, payment_type, payment_value)
+                        VALUES (:oid, :type, :val)
+                    """),
+                    {"oid": new_id, "type": "cash_on_delivery", "val": round(total, 2)}
                 )
- 
+
                 await session.commit()
- 
+
                 logger.info(f"[REORDER] {new_id} from {src_id} for customer {customer_id}")
- 
+
                 return self.success({
-                    "outcome": "reordered",
+                    "outcome":      "reordered",
                     "new_order_id": new_id,
-                    "items": [i["product_name"] for i in items],
-                    "total_items": len(items),
-                    "total": round(total, 2),
-                    "eta": eta.strftime("%B %d, %Y"),
-                    "message": f"Reorder placed successfully. Order ID: {new_id}. ETA: {eta.strftime('%B %d, %Y')}."
+                    "source_order_id": src_id,
+                    "items":        [i["product_name"] for i in items],
+                    "total_items":  len(items),
+                    "total":        round(total, 2),
+                    "payment_method": "cash_on_delivery",
+                    "eta":          eta.strftime("%B %d, %Y"),
+                    "message": (
+                        f"Reorder placed successfully! Order ID: {new_id}. "
+                        f"Payment: Cash on Delivery. Total: ₹{round(total, 2)}. "
+                        f"ETA: {eta.strftime('%B %d, %Y')}."
+                    )
                 })
- 
+
         except Exception as e:
             logger.exception(f"ReorderLastOrderPG failed: {email}")
             return self.error(f"Reorder failed: {str(e)}")
- 
-        except Exception as e:
-            logger.exception(f"ReorderLastOrderPG.execute failed for {email}")
-            return self.error(f"Unexpected error while placing reorder: {str(e)}") 
-
 
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
