@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update,text
 from sqlalchemy.orm import selectinload
 
 from backend.core.config import get_settings
@@ -20,7 +20,82 @@ settings = get_settings()
 # with this prefix so the LLM can replay its own reasoning on the next turn.
 _TOOL_CALLS_MARKER = "__tool_calls__:"
 
+# ── Tool result slimmer ───────────────────────────────────────────────────────
+# Full Mongo documents can be 500+ tokens. We strip fields the LLM never needs
+# so history re-plays are cheap. Only applied before DB storage — the live
+# in-request result that the LLM sees this turn is always the full response.
 
+_FIELDS_TO_DROP_FROM_ORDERS = {
+    "_seed", "userId", "invoiceId", "_id", "payment_summary",
+}
+_PRODUCT_FIELDS_TO_KEEP = {"name", "price", "amount"}
+
+
+def _slim_tool_result(tool_name: str, content_str: str) -> str:
+    """
+    Strip heavyweight fields from tool results before persisting.
+    Returns the original string if parsing fails or tool is not handled.
+ 
+    With the meta-tool architecture, the stored tool_name is "tool_invoke".
+    The real tool name is tagged inside the result JSON as _invoked_tool
+    by ToolInvokeTool.execute(). We read that tag to apply the right slimming.
+ 
+    The _invoked_tool tag itself is stripped after use — it's internal only.
+    """
+    try:
+        result = json.loads(content_str)
+        if not result.get("success"):
+            return content_str  # keep error messages intact
+ 
+        # ── Resolve the real tool name ──────────────────────────────────────
+        # In meta-tool mode: result["_invoked_tool"] = "get_order_details" etc.
+        # In direct mode (legacy / fallback): tool_name is already the real name.
+        real_tool_name = result.pop("_invoked_tool", None) or tool_name
+ 
+        data = result.get("data", {})
+ 
+        if real_tool_name == "get_order_details" and isinstance(data, dict):
+            for f in _FIELDS_TO_DROP_FROM_ORDERS:
+                data.pop(f, None)
+            if "products" in data:
+                data["products"] = [
+                    {k: v for k, v in p.items() if k in _PRODUCT_FIELDS_TO_KEEP}
+                    for p in data["products"]
+                ]
+            data.pop("status_history", None)
+            if "delivery_date_change_request" in data:
+                req = data["delivery_date_change_request"]
+                data["delivery_date_change_request"] = {
+                    "status":         req.get("status"),
+                    "requested_date": req.get("requested_date"),
+                }
+            result["data"] = data
+ 
+        elif real_tool_name == "get_order_history" and isinstance(data, dict):
+            orders = data.get("orders", [])
+            data["orders"] = [
+                {
+                    "order_id":           o.get("order_id"),
+                    "status":             o.get("status"),
+                    "estimated_delivery": o.get("estimated_delivery"),
+                    "items":              o.get("items", [])[:3],
+                }
+                for o in orders
+            ]
+            result["data"] = data
+ 
+        elif real_tool_name == "get_user_profile" and isinstance(data, dict):
+            keep = {"name", "surname", "email", "loyaltyTier", "loyaltyPoints", "accountStatus"}
+            result["data"] = {k: v for k, v in data.items() if k in keep}
+ 
+        # tool_search and tool_invoke results are small — no slimming needed.
+        # think results are tiny — no slimming needed.
+ 
+        return json.dumps(result)
+ 
+    except Exception:
+        return content_str  # never crash — return original on any error
+    
 class ConversationStore:
     def __init__(self, db=None, session_factory=None):
         self._db              = db
@@ -248,43 +323,40 @@ class ConversationStore:
             conv = result.scalar_one()
             return self._pg_conv_to_dict(conv)
 
-    async def _pg_append_turn(
-        self,
-        session_id:   str,
-        user_message: str,
-        bot_reply:    str,
-        tool_calls:   list,
-        tool_results: list,
-    ) -> None:
+    async def _pg_append_turn(self, session_id, user_message, bot_reply, tool_calls, tool_results):
         now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
 
+            # Get current max sequence for this session
+            seq_result = await session.execute(
+                text("SELECT COALESCE(MAX(sequence), 0) FROM conversation_messages WHERE session_id = :sid"),
+                {"sid": session_id}
+            )
+            seq = seq_result.scalar() + 1
+
             # 1. User message
             session.add(ConversationMessage(
-                session_id   = session_id,
-                role         = "user",
-                content      = user_message,
-                timestamp    = now,
+                session_id = session_id,
+                role       = "user",
+                content    = user_message,
+                timestamp  = now,
+                sequence   = seq,
             ))
+            seq += 1
 
             if tool_calls:
-                # 2. Assistant tool-call decision (encoded with marker)
-                tc_payload = [
-                    {
-                        "id":        tc.id,
-                        "name":      tc.tool_name,
-                        "arguments": tc.arguments,
-                    }
-                    for tc in tool_calls
-                ]
+                # 2. Assistant tool-call decision
+                tc_payload = [{"id": tc.id, "name": tc.tool_name, "arguments": tc.arguments} for tc in tool_calls]
                 session.add(ConversationMessage(
                     session_id = session_id,
                     role       = "assistant",
                     content    = f"{_TOOL_CALLS_MARKER}{json.dumps(tc_payload)}",
                     timestamp  = now,
+                    sequence   = seq,
                 ))
+                seq += 1
 
-                # 3. Tool result messages
+                # 3. Tool results
                 tc_id_to_name = {tc.id: tc.tool_name for tc in tool_calls}
                 for tr in tool_results:
                     session.add(ConversationMessage(
@@ -294,14 +366,17 @@ class ConversationStore:
                         tool_call_id = tr.tool_call_id,
                         name         = tc_id_to_name.get(tr.tool_call_id, "unknown"),
                         timestamp    = now,
+                        sequence     = seq,
                     ))
+                    seq += 1
 
-            # 4. Final assistant text reply
+            # 4. Final assistant reply
             session.add(ConversationMessage(
                 session_id = session_id,
                 role       = "assistant",
                 content    = bot_reply,
                 timestamp  = now,
+                sequence   = seq,
             ))
 
             await session.execute(
@@ -314,13 +389,19 @@ class ConversationStore:
     async def _pg_append_notification(self, session_id, message, status):
         now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
+            seq_result = await session.execute(
+                text("SELECT COALESCE(MAX(sequence), 0) FROM conversation_messages WHERE session_id = :sid"),
+                {"sid": session_id}
+            )
+            seq = seq_result.scalar()+1
+
             session.add(ConversationMessage(
                 session_id = session_id,
                 role       = "notification",
                 content    = message,
-                # Reuse the `name` field to carry the status string for notifications.
                 name       = status,
                 timestamp  = now,
+                sequence   = seq,
             ))
             await session.execute(
                 update(Conversation)
@@ -362,7 +443,6 @@ class ConversationStore:
                     "role":         m.role,
                     "content":      m.content,
                     "timestamp":    m.timestamp.isoformat(),
-                    # For notifications, status was stored in the `name` field.
                     "status":       m.name if m.role == "notification" else None,
                     "tool_call_id": m.tool_call_id,
                     "name":         m.name if m.role != "notification" else None,

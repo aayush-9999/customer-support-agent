@@ -13,6 +13,17 @@ export default function NavSidebar({ activeView, onViewChange, onLogout, user })
         </svg>
       ),
     },
+    {
+      id: 'escalations',
+      label: 'Escalations',
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <path d="M9 2L9 10" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round"/>
+          <circle cx="9" cy="14" r="1.5" fill="currentColor"/>
+          <path d="M3 16 L9 3 L15 16" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+        </svg>
+      ),
+    },
   ]
 
   return (

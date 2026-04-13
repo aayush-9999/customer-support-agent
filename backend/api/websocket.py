@@ -44,6 +44,10 @@ class WebSocketManager:
         """
         ws = self._connections.get(session_id)
         if not ws:
+            logger.warning(
+                f"[WS] notify_session: session='{session_id}' is NOT connected "
+                f"— delivery skipped, relying on persistent store"
+            )
             return False
         try:
             await ws.send_json(payload)

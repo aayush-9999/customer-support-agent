@@ -15,7 +15,6 @@ logger   = logging.getLogger(__name__)
 settings = get_settings()
 
 # Marker prefix used to encode tool_call history rows as assistant messages.
-# routes.py writes these when rebuilding history; _build_messages() decodes them.
 _TOOL_CALLS_MARKER = "__tool_calls__:"
 
 
@@ -23,15 +22,24 @@ class GroqService(LLMBase):
     """
     Groq implementation of LLMBase.
 
-    Flow per request:
-      Iterative loop — send messages with tool schemas → model may call tools
-      → execute tools → feed results back → repeat until model writes final reply
-      or max_iterations is hit.
+    With the meta-tool architecture, this service is significantly simpler:
+    - No schema pruning (_prune_schemas removed — not needed with 2 schemas)
+    - No session state extraction (_extract_session_state removed)
+    - The LLM always gets exactly 2 tool schemas (tool_search + tool_invoke)
+    - Tool invocations still go through the same agentic loop
 
-    Token logging:
-      Every Groq API call returns usage.prompt_tokens / completion_tokens / total_tokens.
-      We log these per iteration AND accumulate totals for the full request so you
-      can see exactly what each conversation turn costs.
+    Token logging is preserved and enhanced:
+    - Logs actual Groq usage per iteration (prompt, completion, total)
+    - Logs cumulative totals at end of request
+    - tool_invoke results are tagged with _invoked_tool for history slimming
+
+    Flow per request:
+      Iterative loop:
+        1. Send messages + 2 meta-tool schemas to Groq
+        2. If model calls think → execute, loop
+        3. If model calls tool_search → execute (returns matching real schemas)
+        4. If model calls tool_invoke → execute real tool, tag result, loop
+        5. If model returns text → done
     """
 
     def __init__(self, tools: list[BaseTool]):
@@ -40,14 +48,22 @@ class GroqService(LLMBase):
         self._tools   = {tool.name: tool for tool in tools}
         self._schemas = [tool.to_groq_schema() for tool in tools]
 
+        logger.info(
+            f"[GROQ] GroqService init — {len(self._schemas)} schemas "
+            f"(meta-tool mode: schemas are always tool_search + tool_invoke)"
+        )
+
     async def chat(
         self,
         messages:      list[Message],
         tools:         list[BaseTool],
         system_prompt: str,
+        session_id: str  = None 
     ) -> AgentResponse:
 
-        groq_messages     = self._build_messages(messages, system_prompt)
+        groq_messages = self._build_messages(messages, system_prompt)
+        self._session_id = session_id  
+
         all_tool_calls:   list[ToolCall]   = []
         all_tool_results: list[ToolResult] = []
 
@@ -56,8 +72,9 @@ class GroqService(LLMBase):
         total_completion_tokens = 0
         total_tokens_used       = 0
 
-        max_iterations = settings.agent_max_iterations
-        iteration      = 0
+        max_iterations         = settings.agent_max_iterations
+        iteration              = 0
+        consecutive_think_only = 0
 
         try:
             while iteration < max_iterations:
@@ -96,15 +113,15 @@ class GroqService(LLMBase):
                 choice  = response.choices[0]
                 message = choice.message
 
-                # ── No tool calls → model is done ─────────────────────────────
+                # ── No tool calls → model is done ─────────────────────────
                 if not message.tool_calls:
                     # Log final cumulative totals for this full request
                     logger.info(
                         f"[TOKENS] ══ REQUEST COMPLETE ══ "
                         f"iterations: {iteration} | "
-                        f"total prompt tokens: {total_prompt_tokens} | "
-                        f"total completion tokens: {total_completion_tokens} | "
-                        f"TOTAL TOKENS USED: {total_tokens_used}"
+                        f"prompt tokens: {total_prompt_tokens} | "
+                        f"completion tokens: {total_completion_tokens} | "
+                        f"TOTAL: {total_tokens_used}"
                     )
                     return AgentResponse(
                         message      = message.content or "",
@@ -112,19 +129,69 @@ class GroqService(LLMBase):
                         tool_results = all_tool_results,
                     )
 
-                # ── Tool calls present → execute and loop ─────────────────────
+                # ── Tool calls present → execute and loop ──────────────────
                 groq_messages.append({
                     "role":       "assistant",
                     "content":    None,
                     "tool_calls": message.tool_calls,
                 })
 
-                tool_result_dicts, tool_calls_made, tool_results_made = (
+                result_dicts, tool_calls_made, tool_results_made = (
                     await self._execute_tool_calls(message.tool_calls)
                 )
                 all_tool_calls.extend(tool_calls_made)
                 all_tool_results.extend(tool_results_made)
-                groq_messages.extend(tool_result_dicts)
+                groq_messages.extend(result_dicts)
+
+                # ── Consecutive think-only guard ───────────────────────────
+                real_tools_this_iter = [
+                    tc for tc in tool_calls_made
+                    if tc.tool_name not in ("think", "tool_search")
+                ]
+                if not real_tools_this_iter:
+                    consecutive_think_only += 1
+                    logger.info(
+                        f"[TOKENS] Think/search-only iteration "
+                        f"{consecutive_think_only}/3 (no data tool executed)"
+                    )
+                    if consecutive_think_only >= 3:
+                        logger.warning(
+                            "[LOOP] 3 consecutive think/search-only iterations — "
+                            "injecting nudge and forcing text reply"
+                        )
+                        groq_messages.append({
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM] You have called think or tool_search 3 times "
+                                "without calling tool_invoke. You MUST now either: "
+                                "(a) call tool_invoke directly with a confirmed tool_id, or "
+                                "(b) reply to the customer explaining what you can and cannot do. "
+                                "Do NOT call think or tool_search again."
+                            )
+                        })
+                        final_resp = await self._client.chat.completions.create(
+                            model       = self._model,
+                            messages    = groq_messages,
+                            tools       = self._schemas,
+                            tool_choice = "none",
+                            temperature = settings.groq_temperature,
+                            max_tokens  = settings.groq_max_tokens,
+                        )
+                        final_content = (
+                            final_resp.choices[0].message.content
+                            or "I'm sorry, I wasn't able to process that. Please try again."
+                        )
+                        logger.info(
+                            f"[TOKENS] ══ REQUEST COMPLETE (think-loop broken) ══ "
+                            f"TOTAL: {total_tokens_used}"
+                        )
+                        return AgentResponse(
+                            message      = final_content,
+                            tool_calls   = all_tool_calls,
+                            tool_results = all_tool_results,
+                        )
+                else:
+                    consecutive_think_only = 0
 
                 logger.info(
                     f"[TOKENS] Iteration {iteration}: called "
@@ -135,9 +202,9 @@ class GroqService(LLMBase):
             # should never be reached, but log totals anyway
             logger.info(
                 f"[TOKENS] ══ REQUEST COMPLETE (max iterations) ══ "
-                f"total prompt tokens: {total_prompt_tokens} | "
-                f"total completion tokens: {total_completion_tokens} | "
-                f"TOTAL TOKENS USED: {total_tokens_used}"
+                f"prompt: {total_prompt_tokens} | "
+                f"completion: {total_completion_tokens} | "
+                f"TOTAL: {total_tokens_used}"
             )
             return AgentResponse(
                 message      = "I wasn't able to complete that in time. Please try again.",
@@ -148,11 +215,11 @@ class GroqService(LLMBase):
         except Exception as e:
             logger.exception("GroqService.chat failed")
             return AgentResponse(
-                message = (
+                message=(
                     "I'm having trouble connecting right now. "
                     "Please try again in a moment."
                 ),
-                error = str(e),
+                error=str(e),
             )
 
     # ── Private ────────────────────────────────────────────────────────────────
@@ -221,6 +288,17 @@ class GroqService(LLMBase):
         self,
         tool_calls: list[Any],
     ) -> tuple[list[dict], list[ToolCall], list[ToolResult]]:
+        """
+        Execute all tool calls returned by the model in this iteration.
+
+        For tool_invoke specifically:
+        - The result from ToolInvokeTool already has _invoked_tool tagged.
+        - We store this tag in the result content so that:
+          a) conversation_store._slim_tool_result can apply the right slimming
+          b) loop.py _build_history_summary can show the real tool name, not "tool_invoke"
+
+        The tag is stored in JSON but is harmless — the LLM ignores unknown fields.
+        """
         result_dicts     = []
         tool_calls_out   = []
         tool_results_out = []
@@ -240,7 +318,9 @@ class GroqService(LLMBase):
                 result = {"success": False, "error": f"Unknown tool: {tool_name}"}
                 logger.warning(f"Groq called unknown tool: {tool_name}")
             else:
-                logger.info(f"Executing tool: {tool_name} with args: {arguments}")
+                logger.info(f"Executing tool: {tool_name} with args: {list(arguments.keys())}")
+                if tool_name == "tool_invoke" and self._session_id:
+                    arguments["session_id"] = self._session_id
                 result = await tool.execute(**arguments)
 
             result_content = json.dumps(result)

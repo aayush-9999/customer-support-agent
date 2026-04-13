@@ -399,6 +399,7 @@ function formatDate(iso) {
   if (!iso) return '—'
   try {
     return new Date(iso).toLocaleDateString('en-GB', {
+      timeZone: 'Asia/Kolkata',   // ← add this
       weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
     })
   } catch { return '—' }
@@ -408,6 +409,7 @@ function formatDateTime(iso) {
   if (!iso) return '—'
   try {
     return new Date(iso).toLocaleString('en-GB', {
+      timeZone: 'Asia/Kolkata',   // ← add this
       day: '2-digit', month: 'short', year: '2-digit',
       hour: '2-digit', minute: '2-digit',
     })

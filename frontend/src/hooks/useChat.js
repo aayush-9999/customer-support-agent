@@ -45,7 +45,8 @@ export function useChat(user) {
   const sessionRef = useRef(null); 
   
   // ── WebSocket connect ──────────────────────────────────────────────────────
-  const connectWs = useCallback((sid) => {
+  // AFTER
+const connectWs = useCallback((sid) => {
     if (wsRef.current) {
       wsRef.current.onclose = null;
       wsRef.current.close();
@@ -53,6 +54,28 @@ export function useChat(user) {
 
     const ws = new WebSocket(buildWsUrl(sid));
     wsRef.current = ws;
+
+    // ← NEW: flush any notifications that arrived while tab was closed/offline
+    ws.onopen = async () => {
+      try {
+        const data = await getConversationHistory();
+        const currentConv = (data.conversations || []).find(
+          c => c.session_id === sid
+        );
+        if (!currentConv) return;
+        const dbNotifications = (currentConv.messages || [])
+          .filter(m => m.role === "notification")
+          .map(m => makeNotification(m.content, m.status || "approved"));
+        if (dbNotifications.length === 0) return;
+        setMessages(prev => {
+          const seen = new Set(
+            prev.filter(m => m.isNotification).map(m => m.content)
+          );
+          const fresh = dbNotifications.filter(n => !seen.has(n.content));
+          return fresh.length > 0 ? [...prev, ...fresh] : prev;
+        });
+      } catch { /* fails silently */ }
+    };
 
     ws.onmessage = (evt) => {
       try {
@@ -67,8 +90,15 @@ export function useChat(user) {
     };
 
     ws.onerror = () => ws.close();
-  }, []);
 
+    // ← NEW: reconnect if socket drops so live pushes aren't permanently lost
+    ws.onclose = () => {
+      if (wsRef.current !== ws) return; // already replaced, don't loop
+      setTimeout(() => {
+        if (sessionRef.current === sid) connectWs(sid);
+      }, 3000);
+    };
+  }, []);
   // ── Init on login ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!user) {
@@ -227,7 +257,9 @@ export function useChat(user) {
     } catch {
       const sid = crypto.randomUUID();
       setSessionId(sid);
+      sessionRef.current = sid;   // ← NEW: keep ref in sync
       connectWs(sid);
+    
     }
   }, [connectWs]);
 

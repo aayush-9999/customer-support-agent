@@ -676,3 +676,17 @@ input, textarea { font-family: var(--font); }
   .shell__main { padding: 0; }
   .chat-window { border-radius: 0; border: none; }
 }
+
+.bubble__text--md p        { margin: 0 0 8px 0; }
+.bubble__text--md p:last-child { margin-bottom: 0; }
+.bubble__text--md strong   { font-weight: 600; }
+.bubble__text--md ul,
+.bubble__text--md ol       { margin: 4px 0 8px 16px; padding: 0; }
+.bubble__text--md li        { margin-bottom: 2px; }
+.bubble__text--md code      { 
+  font-family: monospace; 
+  background: rgba(0,0,0,0.06); 
+  padding: 1px 4px; 
+  border-radius: 3px; 
+  font-size: 0.9em;
+}

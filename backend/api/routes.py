@@ -100,28 +100,18 @@ async def chat(
             tools        = tools,
             history      = history,
         )
-
-        # ── Link session_id to the pending_request after agent returns ────────
-        #
-        # The ChangeDeliveryDatePG tool inserts the pending_request with
-        # session_id=NULL because the tool layer has no knowledge of the HTTP
-        # session. We backfill it here using the already-injected pg_session
-        # (same DI-managed connection, no new session needed).
-        #
-        # FIX: was using bare `session_id` / `user_id` (NameError) instead of
-        #      `body.session_id` / `current_user["_id"]`.
-        # FIX: was spinning up a new session via `async for pg_session in
-        #      get_pg_session()` which creates an unmanaged session outside DI.
-
-        pending_tool_called = any(
-        tc.tool_name in (
+        
+       # ── Link session_id after agent returns ──────────────────────────────────
+        PENDING_TOOLS = {
             "change_delivery_date",
-            "change_delivery_address",
-            "initiate_return","report_missing_item",
-            "cancel_order",          # ← NEW
-        )
-        for tc in response.tool_calls
-    )
+            "change_delivery_address", 
+            "initiate_return",
+            "report_missing_item",
+            "cancel_order",
+        }
+
+        pending_tool_called = any(tc.tool_name in PENDING_TOOLS for tc in response.tool_calls)
+        escalation_called   = any(tc.tool_name == "escalate_to_human" for tc in response.tool_calls)
 
         if pending_tool_called:
             if settings.db_tool_mode == "postgres" and pg_session is not None:
@@ -130,12 +120,13 @@ async def chat(
                         UPDATE pending_requests
                         SET session_id = :session_id
                         WHERE id = (
-                            SELECT id
-                            FROM pending_requests
+                            SELECT id FROM pending_requests
                             WHERE user_id    = :user_id
                             AND status     = 'pending'
                             AND session_id IS NULL
-                            AND type       IN ('date_change', 'address_change', 'return_request','missing_item', 'cancellation_request')
+                            AND type       IN ('date_change', 'address_change',
+                                                'return_request', 'missing_item',
+                                                'cancellation_request')
                             ORDER BY created_at DESC
                             LIMIT 1
                         )
@@ -154,12 +145,49 @@ async def chat(
                         "user_id":    ObjectId(str(current_user["_id"])),
                         "status":     "pending",
                         "session_id": None,
-                        "type":       {"$in": ["date_change", "address_change"]},
+                        "type":       {"$in": [
+                            "date_change", "address_change",
+                            "return_request", "missing_item",
+                            "cancellation_request",
+                        ]},
                     },
                     {"$set": {"session_id": body.session_id}},
-                    sort=[(("created_at", DESCENDING))],
+                    sort=[("created_at", DESCENDING)],
                 )
 
+        if escalation_called:
+            if settings.db_tool_mode == "postgres" and pg_session is not None:
+                await pg_session.execute(
+                    text("""
+                        UPDATE escalations
+                        SET session_id = :session_id
+                        WHERE id = (
+                            SELECT id FROM escalations
+                            WHERE user_id    = :user_id
+                            AND status     = 'open'
+                            AND session_id IS NULL
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        )
+                    """),
+                    {
+                        "session_id": body.session_id,
+                        "user_id":    str(current_user["_id"]),
+                    }
+                )
+                await pg_session.commit()
+
+            elif settings.db_tool_mode == "mongo" and db is not None:
+                from pymongo import DESCENDING
+                await db.escalations.find_one_and_update(
+                    {
+                        "user_id":    ObjectId(str(current_user["_id"])),
+                        "status":     "open",
+                        "session_id": None,
+                    },
+                    {"$set": {"session_id": body.session_id}},
+                    sort=[("created_at", DESCENDING)],
+                )
         # ── Persist the full turn ─────────────────────────────────────────────
         await conversations.append_turn(
             session_id   = body.session_id,

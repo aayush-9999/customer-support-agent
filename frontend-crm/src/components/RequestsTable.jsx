@@ -185,10 +185,12 @@ function formatDate(iso) {
     return '—'
   }
 }
-
 function formatAge(iso) {
   if (!iso) return '—'
-  const diff = Date.now() - new Date(iso).getTime()
+  const normalized = iso.endsWith('Z') || iso.includes('+')
+    ? iso
+    : iso.replace(' ', 'T') + 'Z'
+  const diff = Date.now() - new Date(normalized).getTime()
   const m = Math.floor(diff / 60000)
   if (m < 1)   return 'just now'
   if (m < 60)  return `${m}m`

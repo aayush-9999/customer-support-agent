@@ -71,3 +71,22 @@ export async function approveRequest(id) {
 export async function rejectRequest(id, note = '') {
   return request('POST', `/admin/requests/${id}/reject`, { note })
 }
+
+// ── Escalations ───────────────────────────────────────────────────────────────
+
+function normalizeEscalation(esc) {
+  return {
+    ...esc,
+    _id: esc._id ?? esc.id,
+  }
+}
+
+export async function fetchEscalations(status = 'open') {
+  const data = await request('GET', `/admin/escalations?status=${status}`)
+  const rows = Array.isArray(data) ? data : (data.escalations ?? [])
+  return rows.map(normalizeEscalation)
+}
+
+export async function resolveEscalation(id, note = '') {
+  return request('POST', `/admin/escalations/${id}/resolve`, { note })
+}

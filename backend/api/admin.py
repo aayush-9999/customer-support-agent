@@ -206,6 +206,8 @@ async def _pg_approve_request(
         requested_date = req["requested_date"]
         if isinstance(requested_date, datetime):
             requested_date = requested_date.date()
+        elif isinstance(requested_date, str):
+            requested_date = date.fromisoformat(requested_date.split("T")[0])  # ← add this line
 
         await session.execute(
             text("""
@@ -217,9 +219,9 @@ async def _pg_approve_request(
         )
 
         approval_message = (
-            f"Great news! Your delivery date change request has been approved. "
-            f"Your new delivery date is {_format_date(req['requested_date'])}."
-        )
+                f"Great news! Your delivery date change request has been approved. "
+                f"Your new delivery date is {_format_date(requested_date)}."  # ← use stripped variable
+                )
 
     elif req["type"] == "address_change":
         new_address = (
@@ -307,21 +309,35 @@ async def _pg_approve_request(
     await session.commit()
 
     session_id = req["session_id"] or ""
-    if session_id:
-        await conversations.append_notification(
-            session_id = session_id,
-            message    = approval_message,
-            status     = "approved",
+    if not session_id:
+        logger.warning(
+            f"[NOTIFY] No session_id for request={request_id} type={req['type']} "
+            f"— cannot deliver approval notification"
         )
-
-    await ws_manager.notify_session(
-        session_id = session_id,
-        payload    = {
-            "type":    "request_resolved",
-            "status":  "approved",
-            "message": approval_message,
-        }
-    )
+    else:
+        try:
+            await conversations.append_notification(
+                session_id = session_id,
+                message    = approval_message,
+                status     = "approved",
+            )
+            delivered = await ws_manager.notify_session(
+                session_id = session_id,
+                payload    = {
+                    "type":    "request_resolved",
+                    "status":  "approved",
+                    "message": approval_message,
+                }
+            )
+            logger.info(
+                f"[NOTIFY] Approval notification — request={request_id} "
+                f"session={session_id} ws_delivered={delivered}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[NOTIFY] Failed to send approval notification "
+                f"request={request_id} session={session_id}: {e}"
+            )
 
     return {"status": "approved", "request_id": request_id, "note": note}
 
@@ -389,21 +405,35 @@ async def _pg_reject_request(
     )
 
     session_id = req["session_id"] or ""
-    if session_id:
-        await conversations.append_notification(
-            session_id = session_id,
-            message    = rejection_message,
-            status     = "rejected",
+    if not session_id:
+        logger.warning(
+            f"[NOTIFY] No session_id for request={request_id} type={req['type']} "
+            f"— cannot deliver rejection notification"
         )
-
-    await ws_manager.notify_session(
-        session_id = session_id,
-        payload    = {
-            "type":    "request_resolved",
-            "status":  "rejected",
-            "message": rejection_message,
-        }
-    )
+    else:
+        try:
+            await conversations.append_notification(
+                session_id = session_id,
+                message    = rejection_message,
+                status     = "rejected",
+            )
+            delivered = await ws_manager.notify_session(
+                session_id = session_id,
+                payload    = {
+                    "type":    "request_resolved",
+                    "status":  "rejected",
+                    "message": rejection_message,
+                }
+            )
+            logger.info(
+                f"[NOTIFY] Rejection notification — request={request_id} "
+                f"session={session_id} ws_delivered={delivered}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[NOTIFY] Failed to send rejection notification "
+                f"request={request_id} session={session_id}: {e}"
+            )
 
     return {"status": "rejected", "request_id": request_id, "note": note}
 
@@ -427,6 +457,87 @@ async def _pg_get_stats(session: AsyncSession) -> dict:
         "total":    row["total"],
     }
 
+@router.get("/escalations")
+async def get_escalations(
+    status:       str          = "open",
+    session:      AsyncSession = Depends(get_pg_session),
+    _:            dict         = Depends(get_current_admin),
+):
+    result = await session.execute(
+        text("""
+            SELECT
+                e.id,
+                e.reason,
+                e.status,
+                e.priority,
+                e.order_id,
+                e.customer_note,
+                e.created_at,
+                e.resolved_at,
+                e.resolved_by,
+                e.resolution_note,
+                u.name,
+                u.surname,
+                u.email,
+                u.loyalty_tier
+            FROM escalations e
+            LEFT JOIN users u ON u.id = e.user_id
+            WHERE e.status = :status
+            ORDER BY e.priority DESC, e.created_at ASC
+            LIMIT 50
+        """),
+        {"status": status}
+    )
+    rows = result.mappings().all()
+
+    escalations = []
+    for row in rows:
+        escalations.append({
+            "id":              row["id"],
+            "reason":          row["reason"],
+            "status":          row["status"],
+            "priority":        row["priority"],
+            "order_id":        row["order_id"],
+            "customer_note":   row["customer_note"],
+            "created_at":      str(row["created_at"]) if row["created_at"] else None,
+            "resolved_at":     str(row["resolved_at"]) if row["resolved_at"] else None,
+            "resolved_by":     row["resolved_by"],
+            "resolution_note": row["resolution_note"],
+            "customer": {
+                "name":        f"{row['name']} {row['surname']}",
+                "email":       row["email"],
+                "loyaltyTier": row["loyalty_tier"],
+            },
+        })
+    return {"escalations": escalations}
+
+
+@router.post("/escalations/{escalation_id}/resolve")
+async def resolve_escalation(
+    escalation_id: str,
+    body:          ResolutionBody,
+    session:       AsyncSession = Depends(get_pg_session),
+    admin:         dict         = Depends(get_current_admin),
+):
+    now = datetime.now(timezone.utc)
+    await session.execute(
+        text("""
+            UPDATE escalations
+            SET status          = 'resolved',
+                resolved_at     = :resolved_at,
+                resolved_by     = :resolved_by,
+                resolution_note = :note
+            WHERE id = :id
+        """),
+        {
+            "id":          escalation_id,
+            "resolved_at": now,
+            "resolved_by": admin["email"],
+            "note":        body.note,
+        }
+    )
+    await session.commit()
+    return {"status": "resolved", "escalation_id": escalation_id}
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 

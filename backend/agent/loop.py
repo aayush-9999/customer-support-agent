@@ -11,12 +11,10 @@ logger = logging.getLogger(__name__)
 
 # How many recent turns to keep verbatim in history.
 # Older turns beyond this are compressed into a compact summary message.
-# A "turn" = one user message + the agent's full response sequence.
 VERBATIM_TURNS = 3
 
 # Approximate token cost per tool schema sent to the LLM.
-# Groq charges ~150–300 tokens per schema; 250 is a reasonable midpoint.
-# Used only for estimation logging — not for actual billing.
+# With the 2-meta-tool architecture only 2 schemas are ever sent.
 _TOKENS_PER_SCHEMA = 250
 
 SYSTEM_PROMPT_TEMPLATE = """
@@ -26,31 +24,56 @@ You have access to real customer data through tools.
 ══ REASONING ══
 Before calling any tool, call the `think` tool first to plan your approach:
   1. What is the customer asking?
-  2. Do I already have that data in the conversation above?
-  3. If not — which tool gets it?
-  4. Do I have all required arguments right now?
-Never call a data-fetching tool without calling `think` first.
-Never call a tool with a guessed, invented, or placeholder argument.
+  2. Do I already have the data I need in this conversation? (Check history CAREFULLY)
+  3. If yes → use that data to reply. Do NOT re-fetch.
+  4. If no → what do I need to find, and do I have all required arguments?
+Never call `think` at the same time as a data tool. Think first, then act.
+Never call a tool with a guessed or invented argument value.
 Only report what a tool actually returned. If it errors, say so.
 Do not narrate tool calls — call silently, reply with the result.
+Always display order IDs in full — never truncate, shorten, or abbreviate them.
+When passing order_id to any tool, always use the exact ID from the tool result — never reconstruct or retype it from memory.
+
+══ STRICT ANTI-HALLUCINATION RULES ══
+NEVER tell the customer that a date change, return, or address change was submitted
+unless you can see the tool's actual response with outcome "pending_approval" or "updated"
+in this conversation.
+NEVER claim to have order details unless a data tool actually returned them
+with success:true in this conversation. Planned ≠ done.
+If your think call said you would call a tool — you have NOT called it yet.
+You MUST still call it. Do not reply to the customer until the actual tool has run.
+
+══ APPROVAL WORKFLOW ══
+When a delivery date change or return tool returns outcome "pending_approval":
+  - Tell the customer their request has been SUBMITTED and is PENDING approval.
+  - Tell them they will hear back within 24 hours.
+  - Do NOT say the date has been changed or confirmed.
+  - Do NOT say the request was approved.
+When the tool returns outcome "rejected":
+  - Explain the reason clearly and offer the earliest_possible date if provided.
+When the tool returns outcome "already_pending":
+  - Tell them a request is already under review and they should wait.
 
 ══ GREETINGS ══
 If the customer's first message is a greeting with no question attached — greet back and ask how you can help. Do NOT call any tool on a pure greeting.
 
 ══ ORDER WORKFLOW ══
 When a customer asks about "my order" without specifying which one:
-  Step 1 → Call think, then get_order_history(email). Say nothing first.
+  Step 1 → Call think ALONE. Then search for and call the tool that lists all customer orders by email.
   Step 2 → 0 orders: "There are no orders on this account."
             1 order: use it directly.
             2+ orders: list them (item name — date — status), ask which one.
-  Step 3 → Wait for confirmation from the customer.
-  Step 4 → Call think, then get_order_details(order_id) with the confirmed ID.
+  Step 3 → Wait for the customer to pick one.
+  Step 4 → Call think ALONE. Then search for and call the tool that gets full order details by order_id.
+
+IMPORTANT: If order details were already fetched for an order this session,
+do NOT re-fetch. The data is in your history — use it.
 
 When a customer wants to change the delivery date:
-  - Must have a confirmed order_id before calling change_delivery_date.
-  - If customer says "sooner" / no specific date: call think first, then get_order_details,
-    read estimated_warehouse_date, compute earliest = warehouse_date + 1 day,
-    tell the customer that date and wait for confirmation.
+  - Must have a confirmed order_id before calling the date-change tool.
+  - If customer says "sooner" / no specific date: call think ALONE first.
+    Then fetch order details if NOT already fetched, read estimated_warehouse_date,
+    compute earliest = warehouse_date + 1 day, tell the customer and wait for confirmation.
   - Never ask the customer to supply a date they cannot know.
 When a customer wants to cancel an order:
   Step 1 → Call think, then get_order_details(order_id) to check status.
@@ -81,20 +104,28 @@ promise delivery dates beyond what the data shows.
 {knowledge_context}
 
 ══ TOOL CALLING RULES (STRICT) ══
-You MUST use the provided tool calling interface when a tool is required.
+You have TWO meta-tools. You MUST use them in this sequence:
 
-CRITICAL:
-- ALWAYS return tool calls using the structured tool_calls format
-- NEVER return function calls in plain text
-- NEVER use formats like <function>...</function>
-- NEVER simulate or describe a tool call in text
-- DO NOT include explanations when calling a tool
+  STEP A — tool_search(query)
+    Call this with a natural-language description of what you need.
+    Example: "get all orders for a customer by email"
+    Example: "change delivery date for a specific order"
+    Example: "initiate return for a delivered order"
+    This returns up to 3 matching tools with their exact parameter schemas.
 
-If a tool is needed:
-→ Call the tool directly using tool_calls
-→ Do NOT generate a normal text response
+  STEP B — tool_invoke(tool_id, arguments)
+    Call this with the exact tool_id from the tool_search result,
+    and all required arguments as a JSON object.
+    Example: tool_invoke("get_order_history", {"email": "user@example.com"})
 
-If you fail to follow this format, the response is invalid.
+RULES:
+- ALWAYS call tool_search before tool_invoke in the same reasoning chain.
+- NEVER guess or construct a tool_id — only use what tool_search returned.
+- NEVER call tool_invoke without a prior tool_search that returned that tool_id.
+- If none of the tool_search results fit, search again with different keywords.
+- Do NOT call tool_search and tool_invoke at the same time — one step at a time.
+- think is the only tool you may call without a prior tool_search.
+- Use the structured tool_calls API format only. If a tool is needed, call it directly.
 """.strip()
 
 
@@ -107,6 +138,10 @@ def _build_history_summary(old_messages: list[Message]) -> Message | None:
     - What the customer asked (truncated)
     - What tools were called and key data from results
     - What the agent replied (truncated)
+
+    Note: with meta-tools, tool calls are now tool_search + tool_invoke.
+    We extract the _invoked_tool tag from tool_invoke results for the summary,
+    so the summary still reads as meaningful data (not just "tool_invoke called").
     """
     if not old_messages:
         return None
@@ -130,9 +165,16 @@ def _build_history_summary(old_messages: list[Message]) -> Message | None:
                 try:
                     payload = json.loads(msg.content[len("__tool_calls__:"):])
                     for tc in payload:
-                        # Skip `think` in the summary — it has no useful data
-                        if tc["name"] != "think":
-                            current_turn.setdefault("tools_called", []).append(tc["name"])
+                        name = tc["name"]
+                        if name == "think":
+                            continue
+                        if name == "tool_invoke":
+                            # Record the actual invoked tool name, not just "tool_invoke"
+                            args = tc.get("arguments", {})
+                            real = args.get("tool_id", "tool_invoke")
+                            current_turn.setdefault("tools_called", []).append(real)
+                        elif name != "tool_search":
+                            current_turn.setdefault("tools_called", []).append(name)
                 except Exception:
                     pass
             else:
@@ -143,7 +185,9 @@ def _build_history_summary(old_messages: list[Message]) -> Message | None:
                 result = json.loads(msg.content)
                 if result.get("success") and result.get("data"):
                     data = result["data"]
-                    snippet = _extract_tool_snippet(msg.name or "", data)
+                    # Determine the real tool name from _invoked_tool tag if present
+                    real_tool_name = result.get("_invoked_tool") or msg.name or ""
+                    snippet = _extract_tool_snippet(real_tool_name, data)
                     if snippet:
                         current_turn.setdefault("tool_data", []).append(snippet)
             except Exception:
@@ -214,6 +258,9 @@ def _extract_tool_snippet(tool_name: str, data: dict) -> str:
         elif tool_name == "cancel_order":
             outcome = data.get("outcome", "")
             return f"Cancel order outcome: {outcome} for order {str(data.get('order_id', ''))[-8:]}"
+        elif tool_name == "initiate_return":
+            return f"Return outcome: {data.get('outcome', '')} request_id={data.get('request_id', '')[:8]}"
+
     except Exception:
         pass
     return ""
@@ -248,8 +295,8 @@ async def run_agent(
 ) -> AgentResponse:
 
     knowledge_context = policy_store.build_context(request.message)
-    system_prompt     = SYSTEM_PROMPT_TEMPLATE.format(
-        knowledge_context=knowledge_context
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.replace(
+        "{knowledge_context}", knowledge_context
     )
 
     # ── History trimming ──────────────────────────────────────────────────────
@@ -279,64 +326,47 @@ async def run_agent(
         logger.info("[CONTEXT] History: first turn — no history")
 
     # ── Build user message ────────────────────────────────────────────────────
+    user_content = request.message
 
-    is_first_turn = not history
-    user_content  = request.message
-
-    if is_first_turn:
-        identity_parts = []
-        if request.user_email:
-            identity_parts.append(f"Customer email: {request.user_email}")
-        if request.order_id:
-            identity_parts.append(f"Confirmed order ID: {request.order_id}")
-        if identity_parts:
-            header = "[" + " | ".join(identity_parts) + "]"
-            user_content = f"{header}\n{request.message}"
-    else:
-        identity_parts = []
-        if request.user_email:
-            identity_parts.append(f"Customer email: {request.user_email}")
-        if request.order_id:
-            identity_parts.append(f"Confirmed order ID: {request.order_id}")
-        if identity_parts:
-            header = "[" + " | ".join(identity_parts) + "]"
-            user_content = f"{header}\n{request.message}"
+    # ALWAYS inject identity header — not just on first turn.
+    # Without this, after history compression the model loses the email
+    # and guesses a placeholder like customer@example.com on turn 2+.
+    identity_parts = []
+    if request.user_email:
+        identity_parts.append(f"Customer email: {request.user_email}")
+    if request.order_id:
+        identity_parts.append(f"Confirmed order ID: {request.order_id}")
+    if identity_parts:
+        header = "[" + " | ".join(identity_parts) + "]"
+        user_content = f"{header}\n{request.message}"
 
     messages.append(Message(role=Role.user, content=user_content))
 
-    # ── Log total estimated input size (now including schema tokens) ──────────
-    #
-    # Previous estimate only counted message content — that explained why logs
-    # showed ~1,700-2,750 tokens but Groq billed 8,000-11,000.
-    # The missing cost was:
-    #   - Tool schemas (sent every iteration): ~250 tokens × N tools
-    #   - max_tokens reservation: groq_max_tokens counted against TPD billing
-    # We still can't know the post-pruning schema count here (that happens inside
-    # GroqService), but we log the baseline (unpruned) to make the gap visible.
-
-    history_tokens  = sum(max(1, len(m.content) // 4) for m in messages if m.content)
-    prompt_tokens   = max(1, len(system_prompt) // 4)
-    n_schemas       = len(tools)
-    schema_tokens   = n_schemas * _TOKENS_PER_SCHEMA
+    # ── Token estimation log ──────────────────────────────────────────────────
+    # With meta-tools, only 2 schemas are ever sent regardless of real tool count.
+    history_tokens = sum(max(1, len(m.content) // 4) for m in messages if m.content)
+    prompt_tokens  = max(1, len(system_prompt) // 4)
+    n_schemas      = len(tools)   # always 2 in meta-tool mode
+    schema_tokens  = n_schemas * _TOKENS_PER_SCHEMA
 
     logger.info(
         f"[CONTEXT] Estimated input — "
         f"system prompt: ~{prompt_tokens} tokens | "
         f"messages: ~{history_tokens} tokens | "
-        f"schemas (unpruned, ×2 iters): ~{schema_tokens * 2} tokens | "
-        f"max_tokens reservation: ~{getattr(__import__('backend.core.config', fromlist=['get_settings']).get_settings(), 'groq_max_tokens', 1024)} tokens | "
-        f"rough total estimate: ~{prompt_tokens + history_tokens + schema_tokens * 2} tokens"
+        f"schemas ({n_schemas} meta-tools): ~{schema_tokens} tokens | "
+        f"rough total: ~{prompt_tokens + history_tokens + schema_tokens} tokens"
     )
 
     logger.info(
         f"Running agent — session={request.session_id} "
-        f"email={request.user_email} first_turn={is_first_turn}"
+        f"email={request.user_email}"
     )
 
     response = await llm.chat(
         messages      = messages,
         tools         = tools,
         system_prompt = system_prompt,
+        session_id    = request.session_id,
     )
 
     logger.info(

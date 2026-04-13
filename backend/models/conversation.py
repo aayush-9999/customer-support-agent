@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, ForeignKey, Text
+from sqlalchemy import String, DateTime, ForeignKey, Text, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.models.base import Base
 
@@ -17,10 +17,10 @@ class Conversation(Base):
     last_active: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     messages: Mapped[list["ConversationMessage"]] = relationship(
-        "ConversationMessage",
-        back_populates="conversation", 
-        order_by="ConversationMessage.timestamp",
-    )
+    "ConversationMessage",
+    back_populates="conversation",
+    order_by="ConversationMessage.sequence",  # ← was timestamp
+)
 
 
 class ConversationMessage(Base):
@@ -31,7 +31,7 @@ class ConversationMessage(Base):
     role:         Mapped[str]        = mapped_column(String, nullable=False)
     content:      Mapped[str]        = mapped_column(Text, nullable=False)
     timestamp:    Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
+    sequence:     Mapped[int | None] = mapped_column(Integer, nullable=True) 
     # ── Tool call tracking ────────────────────────────────────────────────────
     # These are only populated for role="tool" messages (tool result rows).
     # For all other roles both columns are NULL.
