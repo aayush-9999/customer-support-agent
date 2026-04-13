@@ -114,6 +114,10 @@ async def _pg_get_pending_requests(status: str, session: AsyncSession) -> list[d
                 pr.id, pr.type, pr.status, pr.order_id, pr.user_id,
                 pr.requested_date, pr.current_date, pr.session_id,
                 pr.created_at, pr.resolved_at, pr.resolved_by, pr.resolution_note,
+                pr.requested_address, pr.requested_city, pr.requested_state, pr.requested_pincode,
+                pr.current_address, pr.current_city, pr.current_state, pr.current_pincode,
+                pr.reason, pr.items, pr.refund_method, pr.return_shipping_covered_by,
+                pr.reported_items, pr.received_items, pr.package_condition, pr.resolution_type,
                 o.order_status, o.order_estimated_delivery_date,
                 u.name, u.surname, u.email, u.loyalty_tier
 
