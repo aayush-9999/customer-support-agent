@@ -2098,6 +2098,7 @@ class CancelOrderPG(BaseTool):
         email    = kwargs.get("email", "").strip().lower()
         order_id = kwargs.get("order_id", "").strip()
         reason   = kwargs.get("reason", "other").strip()
+        session_id  = kwargs.get("session_id")
 
         if not email:
             return self.error("email is required.")
@@ -2210,44 +2211,47 @@ class CancelOrderPG(BaseTool):
                         })
 
                     request_id = str(uuid.uuid4())
-                    now        = datetime.now(timezone.utc)
+                    now_dt     = datetime.now(timezone.utc)
+                    now_date   = now_dt.date()
 
                     await session.execute(
                         text("""
-                            INSERT INTO pending_requests (
-                                id,
-                                type,
-                                status,
-                                order_id,
-                                user_id,
-                                requested_date,
-                                "current_date",
-                                session_id,
-                                reason,
-                                refund_method,
-                                created_at
-                            ) VALUES (
-                                :id,
-                                'cancellation_request',
-                                'pending',
-                                :order_id,
-                                :user_id,
-                                :now,
-                                :now,
-                                NULL,
-                                :reason,
-                                'original_payment',
-                                :now
-                            )
-                        """),
-                        {
-                            "id":       request_id,
-                            "order_id": order_id,
-                            "user_id":  user_id,
-                            "now":      now,
-                            "reason":   reason,
-                        }
+                    INSERT INTO pending_requests (
+                        id,
+                        type,
+                        status,
+                        order_id,
+                        user_id,
+                        requested_date,
+                        "current_date",
+                        session_id,
+                        reason,
+                        refund_method,
+                        created_at
+                    ) VALUES (
+                        :id,
+                        'cancellation_request',
+                        'pending',
+                        :order_id,
+                        :user_id,
+                        :now_date,
+                        :now_date,
+                        :session_id,
+                        :reason,
+                        'original_payment',
+                        :now_dt
                     )
+                """),
+                {
+                    "id":         request_id,
+                    "order_id":   order_id,
+                    "user_id":    user_id,
+                    "now_dt":     now_dt,
+                    "now_date":   now_date,
+                    "reason":     reason,
+                    "session_id": session_id,
+                }
+            )
                     await session.commit()
 
                     logger.info(
