@@ -4,7 +4,6 @@ import logging
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any
-import re
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -91,16 +90,11 @@ class ThinkTool(BaseTool):
         }
 
     async def execute(self, **kwargs: Any) -> dict:
+        # No-op — the value is in forcing the model to write the reasoning,
+        # not in doing anything with it.
         reasoning = kwargs.get("reasoning", "")
         logger.debug(f"[THINK] {reasoning[:200]}")
-        return {
-            "ok": True,
-            "instruction": (
-                "Reasoning recorded. Now act on your plan: "
-                "call the required tool directly. "
-                "Do NOT call think again until you have new data."
-            )
-        }
+        return {"ok": True}
 
 
 # ── 1. Get Order Details ────────────────────────────────────────────────────────

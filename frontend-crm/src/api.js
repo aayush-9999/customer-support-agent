@@ -46,13 +46,20 @@ export async function login(email, password) {
 }
 
 // ── Admin requests ────────────────────────────────────────────────────────────
+function normalizeRequest(req) {
+  return {
+    ...req,
+    _id:             req._id            ?? req.id,             // Mongo: _id  | PG: id
+    requested_value: req.requested_value ?? req.requested_date, // Mongo field | PG field
+    current_value:   req.current_value   ?? req.current_date,   // Mongo field | PG field
+  }
+}
 
 export async function fetchRequests(status = 'pending') {
   const data = await request('GET', `/admin/requests?status=${status}`)
-  // Backend returns { requests: [...], total: N }
-  return Array.isArray(data) ? data : (data.requests ?? [])
+  const rows = Array.isArray(data) ? data : (data.requests ?? [])
+  return rows.map(normalizeRequest)
 }
-
 export async function fetchStats() {
   return request('GET', '/admin/requests/stats')
 }
@@ -63,4 +70,23 @@ export async function approveRequest(id) {
 
 export async function rejectRequest(id, note = '') {
   return request('POST', `/admin/requests/${id}/reject`, { note })
+}
+
+// ── Escalations ───────────────────────────────────────────────────────────────
+
+function normalizeEscalation(esc) {
+  return {
+    ...esc,
+    _id: esc._id ?? esc.id,
+  }
+}
+
+export async function fetchEscalations(status = 'open') {
+  const data = await request('GET', `/admin/escalations?status=${status}`)
+  const rows = Array.isArray(data) ? data : (data.escalations ?? [])
+  return rows.map(normalizeEscalation)
+}
+
+export async function resolveEscalation(id, note = '') {
+  return request('POST', `/admin/escalations/${id}/resolve`, { note })
 }

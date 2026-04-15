@@ -47,7 +47,10 @@ function PulseDot() {
 }
 
 function formatRelative(date) {
-  const diff = Math.floor((Date.now() - date) / 1000)
+  const normalized = typeof date === 'string'
+    ? (date.endsWith('Z') || date.includes('+') ? date : date.replace(' ', 'T') + 'Z')
+    : date
+  const diff = Math.floor((Date.now() - new Date(normalized)) / 1000)
   if (diff < 5)  return 'just now'
   if (diff < 60) return `${diff}s ago`
   return `${Math.floor(diff / 60)}m ago`

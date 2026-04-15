@@ -58,13 +58,16 @@ class GroqService(LLMBase):
         messages:      list[Message],
         tools:         list[BaseTool],
         system_prompt: str,
+        session_id: str  = None 
     ) -> AgentResponse:
 
         groq_messages = self._build_messages(messages, system_prompt)
+        self._session_id = session_id  
 
         all_tool_calls:   list[ToolCall]   = []
         all_tool_results: list[ToolResult] = []
 
+        # ── Per-request token accumulators ────────────────────────────────────
         total_prompt_tokens     = 0
         total_completion_tokens = 0
         total_tokens_used       = 0
@@ -80,34 +83,67 @@ class GroqService(LLMBase):
 
                 is_last_iteration = (iteration == max_iterations)
 
-                response = await self._client.chat.completions.create(
-                    model               = self._model,
-                    messages            = groq_messages,
-                    tools               = self._schemas,
-                    tool_choice         = "none" if is_last_iteration else "auto",
-                    temperature         = settings.groq_temperature,
-                    max_tokens          = settings.groq_max_tokens,
-                    parallel_tool_calls = False,   # ← forces one tool per iteration
-                )
+                try:
+                    response = await self._client.chat.completions.create(
+                        model       = self._model,
+                        messages    = groq_messages,
+                        tools       = self._schemas,
+                        tool_choice = "none" if is_last_iteration else "auto",
+                        temperature = settings.groq_temperature,
+                        max_tokens  = settings.groq_max_tokens,
+                    )
+                except Exception as api_err:
+                    logger.warning(f"[GROQ] Bad request on iteration {iteration} — retrying with tool_choice=none")
+                    while groq_messages and groq_messages[-1].get("role") == "assistant" and not groq_messages[-1].get("content"):
+                        groq_messages.pop()
+                    # Inject nudge to force plain text response
+                    groq_messages.append({
+                        "role": "user",
+                        "content": (
+                            "[SYSTEM] Reply to the customer in plain text only. "
+                            "Do NOT output any JSON or tool calls. "
+                            "Use tool_invoke with tool_id to call any tool."
+                        )
+                    })
+                    fallback = await self._client.chat.completions.create(
+                        model       = self._model,
+                        messages    = groq_messages,
+                        tools       = self._schemas,
+                        tool_choice = "none",
+                        temperature = settings.groq_temperature,
+                        max_tokens  = settings.groq_max_tokens,
+                    )
+                    return AgentResponse(
+                        message      = fallback.choices[0].message.content or "I'm sorry, I wasn't able to process that. Please try again.",
+                        tool_calls   = all_tool_calls,
+                        tool_results = all_tool_results,
+                    )
 
+                # ── Log token usage for this API call ─────────────────────────
                 usage = response.usage
                 if usage:
-                    total_prompt_tokens     += usage.prompt_tokens
-                    total_completion_tokens += usage.completion_tokens
-                    total_tokens_used       += usage.total_tokens
+                    iter_prompt     = usage.prompt_tokens
+                    iter_completion = usage.completion_tokens
+                    iter_total      = usage.total_tokens
+
+                    total_prompt_tokens     += iter_prompt
+                    total_completion_tokens += iter_completion
+                    total_tokens_used       += iter_total
+
                     logger.info(
                         f"[TOKENS] Iteration {iteration} — "
-                        f"prompt: {usage.prompt_tokens} | "
-                        f"completion: {usage.completion_tokens} | "
-                        f"total: {usage.total_tokens}"
+                        f"prompt: {iter_prompt} | "
+                        f"completion: {iter_completion} | "
+                        f"total: {iter_total}"
                     )
 
                 choice  = response.choices[0]
-                message = choice.message
+                message = choice.message 
 
                 # ── No tool calls → model is done ─────────────────────────
                 # No tool calls → model is done
                 if not message.tool_calls:
+                    # Log final cumulative totals for this full request
                     content = message.content or ""
                     
                     # Guard against degenerate model output (gibberish, repetition loops)
@@ -213,7 +249,8 @@ class GroqService(LLMBase):
                     f"{[tc.tool_name for tc in tool_calls_made]}, looping..."
                 )
 
-            # max_iterations hit
+            # Safety net — last iteration forces tool_choice=none so this
+            # should never be reached, but log totals anyway
             logger.info(
                 f"[TOKENS] ══ REQUEST COMPLETE (max iterations) ══ "
                 f"prompt: {total_prompt_tokens} | "
@@ -333,6 +370,8 @@ class GroqService(LLMBase):
                 logger.warning(f"Groq called unknown tool: {tool_name}")
             else:
                 logger.info(f"Executing tool: {tool_name} with args: {list(arguments.keys())}")
+                if tool_name == "tool_invoke" and self._session_id:
+                    arguments["session_id"] = self._session_id
                 result = await tool.execute(**arguments)
 
             result_content = json.dumps(result)

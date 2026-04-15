@@ -105,20 +105,11 @@ function RequestRow({ req, selected, animatingOut, onClick }) {
 
   // NEW: Determine request type (added without removing anything)
   let requestType = "Unknown"
-
-  if (req.type === "date_change") {
-    requestType = "Delivery Date Change"
-  }
-
-  if (req.type === "return_request") {
-    requestType = "Return Request"
-  }
-
-  // ✅ NEW: item change support
-  if (req.type === "item_change") {
-    requestType = "Item Change"
-  }
-
+  if (req.type === "date_change")    requestType = "Delivery Date Change"
+  if (req.type === "address_change") requestType = "Address Change"
+  if (req.type === "return_request") requestType = "Return Request"
+  if (req.type === "missing_item")   requestType = "Missing Item Report"  
+  if (req.type === "cancellation_request")  requestType = "Order Cancellation"  
   // Build row style without conflicting shorthand/longhand
   const rowStyle = {
     ...styles.row,
@@ -152,34 +143,9 @@ function RequestRow({ req, selected, animatingOut, onClick }) {
 
       {/* NEW: Type column - added */}
       <div style={{ ...styles.cell, flex: '0 0 160px' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-
-          {/* Request Type */}
-          <span
-            style={{
-              fontSize: '12px',
-              fontWeight: 600,
-              color: 'var(--text-primary)',
-            }}
-          >
-            {requestType}
-          </span>
-
-          {/* Variant Change (only for item_change) */}
-          {req?.type === "item_change" && (
-            <span
-              style={{
-                fontSize: '11px',
-                color: 'var(--text-muted)',
-              }}
-            >
-              {req?.old_size || req?.old_color || req?.new_size || req?.new_color
-                ? `${req?.old_size || '-'} / ${req?.old_color || '-'} → ${req?.new_size || '-'} / ${req?.new_color || '-'}`
-                : 'Variant change'}
-            </span>
-          )}
-
-        </div>
+        <span style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-primary)' }}>
+          {requestType}
+        </span>
       </div>
 
       {/* Original Current Date & Requested columns kept but hidden so nothing breaks */}
@@ -219,10 +185,12 @@ function formatDate(iso) {
     return '—'
   }
 }
-
 function formatAge(iso) {
   if (!iso) return '—'
-  const diff = Date.now() - new Date(iso).getTime()
+  const normalized = iso.endsWith('Z') || iso.includes('+')
+    ? iso
+    : iso.replace(' ', 'T') + 'Z'
+  const diff = Date.now() - new Date(normalized).getTime()
   const m = Math.floor(diff / 60000)
   if (m < 1)   return 'just now'
   if (m < 60)  return `${m}m`

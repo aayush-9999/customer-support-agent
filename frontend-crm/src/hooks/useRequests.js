@@ -5,7 +5,7 @@
 // The CRM never polls blindly anymore — it only fetches when something changed.
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { fetchRequests, fetchStats, approveRequest, rejectRequest } from '../api.js'
+import { fetchRequests, fetchStats, approveRequest, rejectRequest, fetchEscalations, resolveEscalation } from '../api.js' 
 
 export function useRequests(tab = 'pending') {
   const [requests, setRequests]         = useState([])
@@ -57,7 +57,9 @@ export function useRequests(tab = 'pending') {
         try {
           const msg = JSON.parse(evt.data)
           if (msg.type === 'new_request') {
-            // A new pending request was just created — refresh immediately
+            load()
+          }
+          if (msg.type === 'new_escalation') {
             load()
           }
         } catch {
@@ -94,7 +96,6 @@ export function useRequests(tab = 'pending') {
 
   // ── Approve / Reject action ───────────────────────────────────────────────────
   const action = useCallback(async (id, type, note = '') => {
-    // Animate the row out first for snappy UX
     setAnimatingOut(prev => new Set([...prev, id]))
 
     try {
@@ -104,14 +105,14 @@ export function useRequests(tab = 'pending') {
         await rejectRequest(id, note)
       }
     } catch (e) {
-      // Restore row if API call failed
       setAnimatingOut(prev => { const s = new Set(prev); s.delete(id); return s })
+      setError(e.message || 'Action failed. Please try again.')  // ← NEW: surface it
       throw e
     }
 
     // Wait for CSS animation, then remove from list and refresh stats
     setTimeout(async () => {
-      setRequests(prev => prev.filter(r => r._id !== id))
+      setRequests(prev => prev.filter(r => r.id !== id))
       setAnimatingOut(prev => { const s = new Set(prev); s.delete(id); return s })
       try {
         const st = await fetchStats()

@@ -4,7 +4,7 @@ import LoginPage        from './components/LoginPage.jsx'
 import NavSidebar       from './components/NavSidebar.jsx'
 import RequestsView     from './components/RequestsView.jsx'
 import { useState }     from 'react'
-
+import EscalationsView    from './components/EscalationsView.jsx'
 export default function App() {
   const { user, loading, error, login, logout } = useAuth()
   const [activeView, setActiveView] = useState('requests')
@@ -32,6 +32,7 @@ export default function App() {
 
       <main style={styles.main}>
         {activeView === 'requests' && <RequestsView />}
+        {activeView === 'escalations' && <EscalationsView />}
       </main>
     </div>
   )

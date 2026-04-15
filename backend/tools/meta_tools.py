@@ -96,6 +96,7 @@ class ToolInvokeTool(BaseTool):
 
     def __init__(self, registry: ToolRegistry):
         self._registry = registry
+        self._session_id = None
 
     @property
     def name(self) -> str:
@@ -137,6 +138,9 @@ class ToolInvokeTool(BaseTool):
     async def execute(self, **kwargs: Any) -> dict:
         tool_id   = kwargs.get("tool_id", "").strip()
         arguments = kwargs.get("arguments", {})
+        session_id = kwargs.get("session_id")             # ← add this line
+        if session_id:
+            arguments["session_id"] = session_id 
 
         if not tool_id:
             return self.error("tool_id is required.")
@@ -152,6 +156,9 @@ class ToolInvokeTool(BaseTool):
                 f"Valid tool_ids are: {available}. "
                 f"Call tool_search first to get the correct tool_id."
             )
+        
+        if self._session_id and "session_id" not in arguments:
+            arguments["session_id"] = self._session_id
 
         logger.info(f"[TOOL_INVOKE] tool_id={tool_id}, args={list(arguments.keys())}")
 

@@ -13,10 +13,16 @@ function formatTime(ts) {
   }
 }
 
+function stripLeakedToolJson(text) {
+  if (!text) return "";
+  return text
+    .replace(/\[\s*\{\s*"name"\s*:\s*"tool_\w+"[\s\S]*?\}\s*\]/g, "")
+    .trim();
+}
+
 export function MessageBubble({ message }) {
   const isUser = message.role === "user";
 
-  // ── Admin notification pill ───────────────────────────────────────────────
   if (message.isNotification) {
     const isApproved = message.status === "approved";
     return (
@@ -39,7 +45,6 @@ export function MessageBubble({ message }) {
     );
   }
 
-  // ── Regular message bubble ────────────────────────────────────────────────
   return (
     <div className={`msg-row ${isUser ? "msg-row--user" : "msg-row--bot"}`}>
       {!isUser && (
@@ -52,7 +57,7 @@ export function MessageBubble({ message }) {
 
       <div className="msg-content">
         <div className={`bubble ${isUser ? "bubble--user" : "bubble--bot"} ${message.isError ? "bubble--error" : ""}`}>
-          <p className="bubble__text">{message.content}</p>
+          <p className="bubble__text">{stripLeakedToolJson(message.content)}</p>
         </div>
 
         <div className={`msg-meta ${isUser ? "msg-meta--right" : ""}`}>

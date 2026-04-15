@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update,text
 from sqlalchemy.orm import selectinload
 
 from backend.core.config import get_settings
@@ -87,6 +87,10 @@ def _slim_tool_result(tool_name: str, content_str: str) -> str:
  
         elif real_tool_name == "get_user_profile" and isinstance(data, dict):
             keep = {"name", "surname", "email", "loyaltyTier", "loyaltyPoints", "accountStatus"}
+            result["data"] = {k: v for k, v in data.items() if k in keep}
+        elif real_tool_name == "reorder_last_order" and isinstance(data, dict):
+            keep = {"outcome", "items", "total_items", "order_total",
+                    "ship_to", "estimated_delivery", "message"}
             result["data"] = {k: v for k, v in data.items() if k in keep}
  
         # tool_search and tool_invoke results are small — no slimming needed.
@@ -214,10 +218,9 @@ class ConversationStore:
             tc_id_to_name = {tc.id: tc.tool_name for tc in tool_calls}
 
             for tr in tool_results:
-                tool_nm = tc_id_to_name.get(tr.tool_call_id, "unknown")
                 messages_to_add.append({
                     "role":         "tool",
-                    "content":      _slim_tool_result(tool_nm, tr.content),
+                    "content":      tr.content,
                     "tool_call_id": tr.tool_call_id,
                     "name":         tool_nm,
                     "timestamp":    _now(),
@@ -324,43 +327,40 @@ class ConversationStore:
             conv = result.scalar_one()
             return self._pg_conv_to_dict(conv)
 
-    async def _pg_append_turn(
-        self,
-        session_id:   str,
-        user_message: str,
-        bot_reply:    str,
-        tool_calls:   list,
-        tool_results: list,
-    ) -> None:
+    async def _pg_append_turn(self, session_id, user_message, bot_reply, tool_calls, tool_results):
         now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
 
+            # Get current max sequence for this session
+            seq_result = await session.execute(
+                text("SELECT COALESCE(MAX(sequence), 0) FROM conversation_messages WHERE session_id = :sid"),
+                {"sid": session_id}
+            )
+            seq = seq_result.scalar() + 1
+
             # 1. User message
             session.add(ConversationMessage(
-                session_id   = session_id,
-                role         = "user",
-                content      = user_message,
-                timestamp    = now,
+                session_id = session_id,
+                role       = "user",
+                content    = user_message,
+                timestamp  = now,
+                sequence   = seq,
             ))
+            seq += 1
 
             if tool_calls:
-                # 2. Assistant tool-call decision (encoded with marker)
-                tc_payload = [
-                    {
-                        "id":        tc.id,
-                        "name":      tc.tool_name,
-                        "arguments": tc.arguments,
-                    }
-                    for tc in tool_calls
-                ]
+                # 2. Assistant tool-call decision
+                tc_payload = [{"id": tc.id, "name": tc.tool_name, "arguments": tc.arguments} for tc in tool_calls]
                 session.add(ConversationMessage(
                     session_id = session_id,
                     role       = "assistant",
                     content    = f"{_TOOL_CALLS_MARKER}{json.dumps(tc_payload)}",
                     timestamp  = now,
+                    sequence   = seq,
                 ))
+                seq += 1
 
-                # 3. Tool result messages
+                # 3. Tool results
                 tc_id_to_name = {tc.id: tc.tool_name for tc in tool_calls}
                 for tr in tool_results:
                     session.add(ConversationMessage(
@@ -370,14 +370,17 @@ class ConversationStore:
                         tool_call_id = tr.tool_call_id,
                         name         = tc_id_to_name.get(tr.tool_call_id, "unknown"),
                         timestamp    = now,
+                        sequence     = seq,
                     ))
+                    seq += 1
 
-            # 4. Final assistant text reply
+            # 4. Final assistant reply
             session.add(ConversationMessage(
                 session_id = session_id,
                 role       = "assistant",
                 content    = bot_reply,
                 timestamp  = now,
+                sequence   = seq,
             ))
 
             await session.execute(
@@ -390,13 +393,19 @@ class ConversationStore:
     async def _pg_append_notification(self, session_id, message, status):
         now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
+            seq_result = await session.execute(
+                text("SELECT COALESCE(MAX(sequence), 0) FROM conversation_messages WHERE session_id = :sid"),
+                {"sid": session_id}
+            )
+            seq = seq_result.scalar()+1
+
             session.add(ConversationMessage(
                 session_id = session_id,
                 role       = "notification",
                 content    = message,
-                # Reuse the `name` field to carry the status string for notifications.
                 name       = status,
                 timestamp  = now,
+                sequence   = seq,
             ))
             await session.execute(
                 update(Conversation)
@@ -438,7 +447,6 @@ class ConversationStore:
                     "role":         m.role,
                     "content":      m.content,
                     "timestamp":    m.timestamp.isoformat(),
-                    # For notifications, status was stored in the `name` field.
                     "status":       m.name if m.role == "notification" else None,
                     "tool_call_id": m.tool_call_id,
                     "name":         m.name if m.role != "notification" else None,

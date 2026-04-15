@@ -50,7 +50,8 @@
       "file": "faqs/orders.md",
       "keywords": ["where is my order", "order status", "change address", "wrong address",
                    "order not arrived", "order update", "when will", "how long",
-                   "where is", "my order", "delivery date", "delivery address"],
+                   "where is", "my order", "delivery date", "delivery address","reorder", "repeat order", "order again", "buy again",
+                   "same order", "repeat my last", "order the same thing"],
       "priority": 7
     },
     {

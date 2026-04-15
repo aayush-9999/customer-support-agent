@@ -16,21 +16,13 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
   // Detect request type
   const isDateChange = request.type === "date_change"
   const isReturn     = request.type === "return_request"
-  const isOrderChange = request.type === "item_change"
+  const isAddressChange = request.type === "address_change"
+  const isMissingItem   = request.type === "missing_item"
+  const isCancellation  = request.type === "cancellation_request" 
 
   // Existing variables for date change (kept unchanged)
   const currentDate   = order.current_delivery || request.current_value
   const requestedDate = request.requested_value
-
-  const currentVariant = {
-  size: request.old_size || '',
-  color: request.old_color || '',
-  }
-
-  const requestedVariant = {
-    size: request.new_size || '',
-    color: request.new_color || '',
-  }
 
   async function handleApprove() {
     setActing(true)
@@ -64,10 +56,11 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
         <div style={styles.header}>
           <div>
             <p style={styles.headerEyebrow}>
-              {isDateChange ? "Delivery date change" : 
-              isReturn ? "Return Request" : 
-              isOrderChange ? "Item Change Request" :
-              "Request"}
+              {isDateChange    ? "Delivery Date Change"  :
+               isAddressChange ? "Address Change"        :
+               isReturn        ? "Return Request"        :
+               isMissingItem   ? "Missing Item Report"   :
+               isCancellation ? "Order Cancellation"   : "Request"}
             </p>
             <h3 style={styles.headerTitle}>
               <span className="mono">#{(request.order_id || '').slice(-8).toUpperCase()}</span>
@@ -113,6 +106,63 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
             </Section>
           )}
 
+          {/* ADDRESS CHANGE SECTION */}
+          {isAddressChange && (
+            <Section title="Address Change Details">
+              <Row label="Current Address" value={
+                <span style={{ fontSize: '11.5px', color: 'var(--text-secondary)', textAlign: 'right', lineHeight: 1.5 }}>
+                  {[request.current_address, request.current_city, request.current_state, request.current_pincode]
+                    .filter(Boolean).join(', ') || '—'}
+                </span>
+              } />
+              <Row label="Requested Address" value={
+                <span style={{ fontSize: '11.5px', color: 'var(--blue-text)', textAlign: 'right', lineHeight: 1.5 }}>
+                  {[request.requested_address, request.requested_city, request.requested_state, request.requested_pincode]
+                    .filter(Boolean).join(', ') || '—'}
+                </span>
+              } />
+              <Row label="Submitted" value={
+                <span className="mono" style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                  {formatDateTime(request.created_at)}
+                </span>
+              } />
+              <Row label="Status" value={
+                <span className={`badge badge-${request.status}`}>{request.status}</span>
+              } />
+            </Section>
+          )}
+
+          {/* MISSING ITEM SECTION */}
+          {isMissingItem && (
+            <Section title="Missing Item Details">
+              <Row label="Missing Items" value={
+                Array.isArray(request.reported_items) && request.reported_items.length > 0
+                  ? request.reported_items.join(', ')
+                  : '—'
+              } />
+              <Row label="Package Condition" value={
+                <span style={{
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  textTransform: 'capitalize',
+                  color: request.package_condition === 'intact'
+                    ? 'var(--text-primary)'
+                    : 'var(--red-text)',
+                }}>
+                  {request.package_condition || '—'}
+                </span>
+              } />
+              <Row label="Submitted" value={
+                <span className="mono" style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                  {formatDateTime(request.created_at)}
+                </span>
+              } />
+              <Row label="Status" value={
+                <span className={`badge badge-${request.status}`}>{request.status}</span>
+              } />
+            </Section>
+          )}
+
           {/* ==================== NEW: RETURN REQUEST SECTION ==================== */}
           {isReturn && (
             <Section title="Return Request Details">
@@ -142,49 +192,24 @@ export default function DetailDrawer({ request, onApprove, onReject, onClose }) 
               } />
             </Section>
           )}
-
-          {/* ==================== NEW: ORDER CHANGE SECTION ==================== */}
-          {isOrderChange && (
-            <Section title="Item Change Details">
-
-              <Row label="Item" value={
-                request.item_name || '—'
-              } />
-
-              <Row label="Current Variant" value={
-                currentVariant.size || currentVariant.color
-                  ? `${currentVariant.size || '-'} / ${currentVariant.color || '-'}`
+          {/* ==================== CANCELLATION REQUEST SECTION ==================== */}
+          {isCancellation && (
+            <Section title="Cancellation Details">
+              <Row label="Reason" value={
+                request.reason
+                  ? request.reason.replace(/_/g, " ")
                   : '—'
               } />
-
-              <Row label="Requested Variant" value={
-                requestedVariant.size || requestedVariant.color
-                  ? (
-                    <span style={{ color: 'var(--blue-text)', fontWeight: '600' }}>
-                      {requestedVariant.size || '-'} / {requestedVariant.color || '-'}
-                    </span>
-                  )
-                  : '—'
-              } />
-
-              <Row label="Stock Source" value={
-                request.stock_source === "warehouse"
-                  ? "Warehouse"
-                  : request.stock_source === "products"
-                    ? "Product Catalogue"
-                    : '—'
-              } />
-
+              <Row label="Refund Method" value="Original Payment Method" />
+              <Row label="Refund Timeline" value="3–5 business days after approval" />
               <Row label="Submitted" value={
                 <span className="mono" style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
                   {formatDateTime(request.created_at)}
                 </span>
               } />
-
               <Row label="Status" value={
                 <span className={`badge badge-${request.status}`}>{request.status}</span>
               } />
-
             </Section>
           )}
 
@@ -374,6 +399,7 @@ function formatDate(iso) {
   if (!iso) return '—'
   try {
     return new Date(iso).toLocaleDateString('en-GB', {
+      timeZone: 'Asia/Kolkata',   // ← add this
       weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
     })
   } catch { return '—' }
@@ -383,6 +409,7 @@ function formatDateTime(iso) {
   if (!iso) return '—'
   try {
     return new Date(iso).toLocaleString('en-GB', {
+      timeZone: 'Asia/Kolkata',   // ← add this
       day: '2-digit', month: 'short', year: '2-digit',
       hour: '2-digit', minute: '2-digit',
     })

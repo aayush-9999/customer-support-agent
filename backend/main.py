@@ -79,7 +79,6 @@ app.include_router(admin_router, prefix="/api")
 #   • Customer notifications also break (wrong handler registered the socket)
 #
 # Keeping /ws/admin first ensures the literal path wins before the wildcard.
-
 @app.websocket("/ws/admin")
 async def admin_websocket_endpoint(websocket: WebSocket):
     admin_id = str(uuid.uuid4())
@@ -89,8 +88,7 @@ async def admin_websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         ws_manager.disconnect_admin(admin_id)
-
-
+        
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await ws_manager.connect(session_id, websocket)

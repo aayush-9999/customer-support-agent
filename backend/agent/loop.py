@@ -17,27 +17,12 @@ VERBATIM_TURNS = 3
 # With the 2-meta-tool architecture only 2 schemas are ever sent.
 _TOKENS_PER_SCHEMA = 250
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DROP-IN REPLACEMENT for the SYSTEM_PROMPT_TEMPLATE string in
-# backend/agent/loop.py
-#
-# Find the line:   SYSTEM_PROMPT_TEMPLATE = """
-# and replace everything up to the closing   """.strip()
-# with the string below (include the .strip() call).
-# ─────────────────────────────────────────────────────────────────────────────
-
 SYSTEM_PROMPT_TEMPLATE = """
 You are a customer support agent for Leafy, a D2C fashion and lifestyle brand.
 You have access to real customer data through tools.
 
-══ IDENTITY ══
-The customer's email is provided in every message as: [Customer email: xxx]
-NEVER guess, invent, or use a placeholder email. Use ONLY the email shown in [Customer email: ...].
-If no email is shown, ask the customer for it before calling any tool.
-
 ══ REASONING ══
-Before calling any data-fetching tool, always call `think` ALONE first (in its own step).
-In `think`, answer:
+Before calling any tool, call the `think` tool first to plan your approach:
   1. What is the customer asking?
   2. What information do I already have in this conversation? (Check history CAREFULLY)
   3. What is missing? What do I need to ask or fetch?
@@ -46,6 +31,8 @@ Never call `think` at the same time as any other tool. Think first, then act.
 Never call a tool with a guessed or invented argument value.
 Only report what a tool actually returned. If it errors, say so.
 Do not narrate tool calls — call silently, reply with the result.
+Always display order IDs in full — never truncate, shorten, or abbreviate them.
+When passing order_id to any tool, always use the exact ID from the tool result — never reconstruct or retype it from memory.
 
 ══ STRICT ANTI-HALLUCINATION RULES ══
 NEVER tell the customer that a date change, return, address change, or item change
@@ -55,6 +42,9 @@ NEVER claim to have order details unless a data tool actually returned them
 with success:true in this conversation. Planned ≠ done.
 If your think call said you would call a tool — you have NOT called it yet.
 You MUST still call it. Do not reply to the customer until the actual tool has run.
+When a tool returns an error, NEVER call real tool names directly.
+ALWAYS use tool_search → tool_invoke sequence.
+NEVER truncate or shorten order IDs — always use the exact full ID from history.
 
 ══ APPROVAL WORKFLOW ══
 When any action tool (delivery date, return, item change, address) returns outcome "pending_approval":
@@ -80,8 +70,9 @@ When a customer asks about "my order" without specifying which one:
             2+ orders: list them (item name — date — status), ask which one.
   Step 3 → Wait for the customer to pick one.
   Step 4 → think ALONE. Then call tool_search → get_order_details by order_id.
-IMPORTANT: If order details were already fetched this session, do NOT re-fetch.
-The data is in your history — read it.
+
+IMPORTANT: If order details were already fetched for an order this session,
+do NOT re-fetch. The data is in your history — use it.
 
 ══ DELIVERY DATE CHANGE WORKFLOW ══
 Follow EVERY step. Do not skip.
@@ -153,6 +144,45 @@ Step 2 — Collect the FULL new address from the customer (street, city, postcod
          Do not submit with a partial address.
 Step 3 — Submit with tool_search → change_delivery_address.
 
+══ MISSING ITEMS WORKFLOW ══
+When a customer reports an empty package or missing items from a delivered order:
+  Step 1 → Call think ALONE to identify the order.
+  Step 2 → Call report_missing_item directly with the confirmed order_id,
+            missing items from the order, and package_condition.
+  Do NOT ask the customer if they want to "initiate a return or replacement" —
+  just submit the missing item report immediately.
+
+══ CANCEL ORDER WORKFLOW ══
+When a customer wants to cancel an order:
+  Step 1 → Call think, then get_order_details(order_id) to check status.
+  Step 2 → Based on status:
+    processing/Processing
+      → Call cancel_order(order_id, user_email, reason="auto").
+      → Tell customer: cancelled, refund in 3–5 business days.
+    invoiced/Invoiced
+      → Tell customer: requires admin review (usually 1 business day).
+      → Ask: "Could you share a brief reason for cancelling?"
+      → Wait for reply, then call cancel_order(order_id, user_email, reason=<reply>).
+      → Confirm request submitted.
+    shipped/Shipped/delivered/Delivered
+      → Explain: can't cancel once dispatched.
+      → Advise: wait for delivery, then initiate return through chat.
+    cancelled/Cancelled
+      → Confirm already cancelled. Refund in 3–5 business days.
+    created/other
+      → Explain: can't cancel in current state.
+      → Advise: contact support.
+  Never call cancel_order without confirmed order_id or with guessed reason.
+
+══ REORDER WORKFLOW ══
+When a customer wants to reorder a previous order:
+  Step 1 → Call think ALONE to identify which order they want to reorder.
+  Step 2 → If customer specifies a particular order → use that order_id.
+            If customer says "my last order" or doesn't specify → omit order_id (tool uses latest delivered).
+  Step 3 → Call reorder_last_order with email and optional order_id.
+  Step 4 → Report back: new order ID, items, total, payment method (Cash on Delivery), and ETA.
+  Never call reorder without confirming the customer wants to proceed.
+
 ══ CANNOT DO ══
 Cannot: upgrade shipping speed, expedite, waive fees, modify order contents (add/remove items),
 promise delivery dates beyond what the tool returns, apply promo codes retroactively.
@@ -183,8 +213,10 @@ RULES:
 - If none of the tool_search results fit, search again with different keywords.
 - Do NOT call tool_search and tool_invoke at the same time — one step at a time.
 - think is the only tool you may call without a prior tool_search.
-- Use the structured tool_calls API format only. Never describe a tool call in text.
+- Use the structured tool_calls API format only. If a tool is needed, call it directly.
+- NEVER mix text and tool calls in the same response. If calling a tool, output ONLY the tool call with zero text. If replying to the customer, output ONLY text with zero tool calls.
 """.strip()
+
 
 def _build_history_summary(old_messages: list[Message]) -> Message | None:
     """
@@ -285,11 +317,11 @@ def _extract_tool_snippet(tool_name: str, data: dict) -> str:
                 summaries = []
                 for o in orders[:3]:
                     items = ", ".join(o.get("items", [])[:2])
-                    summaries.append(f"{o['order_id'][-8:]} ({items}, {o['status']})")
+                    summaries.append(f"{o['order_id']} ({items}, {o['status']})")
                 return f"Orders: {' | '.join(summaries)}"
 
         elif tool_name == "get_order_details":
-            oid    = data.get("_id", "")[-8:]
+            oid    = data.get("_id", "")
             status = data.get("status", "")
             est    = data.get("estimated_destination_date", "")[:10]
             items  = ", ".join(p.get("name", "")[:30] for p in data.get("products", [])[:2])
@@ -313,9 +345,21 @@ def _extract_tool_snippet(tool_name: str, data: dict) -> str:
             addr = data.get("new_address", {})
             return f"Address change: {data.get('outcome', '')} → {addr.get('city', '')}, {addr.get('country', '')}"
 
+        elif tool_name == "cancel_order":
+            outcome = data.get("outcome", "")
+            return f"Cancel order outcome: {outcome} for order {str(data.get('order_id', ''))[-8:]}"
+
         elif tool_name == "initiate_return":
             return f"Return outcome: {data.get('outcome', '')} request_id={data.get('request_id', '')[:8]}"
 
+        elif tool_name == "reorder_last_order":
+            return (
+                f"Reorder outcome: {data.get('outcome', '')} | "
+                f"new_order_id: {data.get('new_order_id', '')} | "
+                f"items: {', '.join(data.get('items', [])[:2])} | "
+                f"total: {data.get('total', '')} | "
+                f"eta: {data.get('eta', '')}"
+            )
     except Exception:
         pass
     return ""
@@ -383,6 +427,9 @@ async def run_agent(
     # ── Build user message ────────────────────────────────────────────────────
     user_content = request.message
 
+    # ALWAYS inject identity header — not just on first turn.
+    # Without this, after history compression the model loses the email
+    # and guesses a placeholder like customer@example.com on turn 2+.
     identity_parts = []
     if request.user_email:
         identity_parts.append(f"Customer email: {request.user_email}")
@@ -418,6 +465,7 @@ async def run_agent(
         messages      = messages,
         tools         = tools,
         system_prompt = system_prompt,
+        session_id    = request.session_id,
     )
 
     logger.info(

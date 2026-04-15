@@ -1,5 +1,3 @@
-// frontend/src/hooks/useChat.js
-
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   getNewSession,
@@ -13,9 +11,20 @@ function makeId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
+function makeNotification(content, status) {
+  return {
+    id: makeId(),
+    role: "notification",
+    content,
+    timestamp: new Date().toISOString(),
+    isNotification: true,
+    status,
+    isError: false,
+  };
+}
+
 /**
- * Convert raw DB message rows (from conversation history) into the flat shape
- * that MessageBubble expects. Strips internal tool-call encoding rows.
+ * Convert raw DB message rows into UI-friendly format
  */
 function buildMessages(rawMsgs = []) {
   return rawMsgs
@@ -31,11 +40,6 @@ function buildMessages(rawMsgs = []) {
       id:             makeId(),
       role:           m.role,
       content:        m.content,
-      // ── FIX: normalise timestamp to always be a UTC-flagged ISO string ────
-      // MongoDB returns datetimes without a Z suffix when tz_aware is not set.
-      // Now that we fixed the backend (tz_aware=True), timestamps will arrive as
-      // "2026-04-13T12:33:21+00:00". But we add the fallback for safety: if the
-      // string has no offset info, we append Z so JS always treats it as UTC.
       timestamp:      normaliseTimestamp(m.timestamp),
       isNotification: m.role === "notification",
       status:         m.status || null,
@@ -51,18 +55,16 @@ function buildMessages(rawMsgs = []) {
 function normaliseTimestamp(ts) {
   if (!ts) return new Date().toISOString();
   if (typeof ts !== "string") return new Date(ts).toISOString();
-  // Already has tz info?
   if (ts.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(ts)) return ts;
-  // Bare UTC string from old backend — stamp it as UTC
   return ts + "Z";
 }
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useChat(user) {
-  const [messages,      setMessages]      = useState([]);
-  const [loading,       setLoading]       = useState(false);
-  const [sessionId,     setSessionId]     = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [sessionId, setSessionId] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
 
@@ -70,10 +72,15 @@ export function useChat(user) {
    * sessionIdRef is the authoritative "which session owns the in-flight request"
    * guard. We use a ref (not state) because closures in async callbacks need to
    * see the latest value synchronously — state updates are batched and async.
+   *
+   * NOTE: We do NOT sync this via a useEffect. A useEffect sync introduces a
+   * one-render lag: if the user sends a message in the same render cycle that
+   * triggered the session change, the ref would still hold the old value. We
+   * assign sessionIdRef.current directly at every call site instead.
    */
   const sessionIdRef       = useRef(null);
   const wsRef              = useRef(null);
-  const reconnectTimerRef  = useRef(null);   // for WS auto-reconnect
+  const reconnectTimerRef  = useRef(null); // tracks pending WS reconnect timers
   const abortControllerRef = useRef(null);
 
   // ── WebSocket ─────────────────────────────────────────────────────────────
@@ -82,7 +89,7 @@ export function useChat(user) {
    * connectWebSocket(sid)
    *
    * Opens a fresh WS connection for the given session, closing any previous one.
-   * Auto-reconnects after 3 s on unexpected close so the customer never misses
+   * Auto-reconnects after 3 s on unexpected close so the user never misses
    * an admin approval/rejection notification mid-session.
    *
    * Guard: if the user switches session while a reconnect is pending, we cancel
@@ -90,52 +97,79 @@ export function useChat(user) {
    * socket for the old session.
    */
   const connectWebSocket = useCallback((sid) => {
-    // ── Cancel any pending reconnect timer for the previous session ──────────
+    // Cancel any pending reconnect timer for the previous session
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
 
-    // ── Close the previous WS without triggering its reconnect logic ─────────
-    // We null out onclose first so the old socket's "reconnect" path doesn't fire.
+    // Null out onclose first so the old socket's reconnect path doesn't fire
     if (wsRef.current) {
       wsRef.current.onclose = null;
       wsRef.current.close();
       wsRef.current = null;
     }
 
+    // Guard: nothing to connect to
+    if (!sid) return;
+
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host     = window.location.host;
-    const ws       = new WebSocket(`${protocol}//${host}/ws/${sid}`);
+    const host = window.location.host;
+
+    const ws = new WebSocket(`${protocol}//${host}/ws/${sid}`);
+    // Assign immediately so the wsRef.current !== ws guard in onclose works
+    wsRef.current = ws;
+
+    ws.onopen = async () => {
+      try {
+        const data = await getConversationHistory();
+        const currentConv = (data.conversations || []).find(
+          (c) => c.session_id === sid
+        );
+
+        if (!currentConv) return;
+
+        const dbNotifications = (currentConv.messages || [])
+          .filter((m) => m.role === "notification")
+          .map((m) => makeNotification(m.content, m.status || "approved"));
+
+        if (dbNotifications.length === 0) return;
+
+        setMessages((prev) => {
+          const seen = new Set(
+            prev.filter((m) => m.isNotification).map((m) => m.content)
+          );
+          const fresh = dbNotifications.filter((n) => !seen.has(n.content));
+          return fresh.length ? [...prev, ...fresh] : prev;
+        });
+      } catch (err) {
+        console.error("WS onopen sync error:", err);
+      }
+    };
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+
         if (data.type !== "request_resolved") return;
 
-        // ── GUARD: only inject notification into the session that owns this WS ──
+        // Guard: only inject notification into the session that owns this WS.
         // If the user has already switched to a different chat, sid is stale.
         if (sessionIdRef.current !== sid) return;
 
         setMessages((prev) => [
           ...prev,
-          {
-            id:             makeId(),
-            role:           "notification",
-            content:        data.message,
-            timestamp:      new Date().toISOString(),
-            isNotification: true,
-            status:         data.status, // "approved" | "rejected"
-            isError:        false,
-          },
+          makeNotification(data.message, data.status),
         ]);
-      } catch (_) {
-        // Malformed WS frame — ignore
+      } catch (err) {
+        console.error("WS message parse error:", err);
       }
     };
 
-    ws.onerror = () => {
-      // Let onclose handle reconnect; onerror fires before onclose on most browsers
+    ws.onerror = (err) => {
+      // Log for debugging; let onclose handle reconnect (onerror fires before
+      // onclose on most browsers, so we avoid double-reconnect by not acting here)
+      console.error("WebSocket error:", err);
       ws.close();
     };
 
@@ -147,7 +181,6 @@ export function useChat(user) {
       // Only reconnect if we're still in the same session.
       if (sessionIdRef.current !== sid) return;
 
-      // Reconnect after 3 s — same pattern as the admin CRM
       reconnectTimerRef.current = setTimeout(() => {
         reconnectTimerRef.current = null;
         // Re-check session hasn't changed during the delay
@@ -156,11 +189,9 @@ export function useChat(user) {
         }
       }, 3000);
     };
+  }, []); // stable — no external deps; reconnect closes over sid
 
-    wsRef.current = ws;
-  }, []); // stable — no external deps; reconnect via closure over sid
-
-  // ── Init: bootstrap session + load history ────────────────────────────────
+  // ── Init on login ──────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!user) return;
@@ -168,31 +199,32 @@ export function useChat(user) {
     let cancelled = false;
 
     async function init() {
-      // 1. Load conversation history in the background
       try {
         const data = await getConversationHistory();
-        if (cancelled) return;
-        setConversations(data.conversations || []);
-      } catch (_) {
-        // History load failure is non-fatal
+        if (!cancelled) {
+          setConversations(data.conversations || []);
+        }
+      } catch (err) {
+        console.error("History load error:", err);
       } finally {
         if (!cancelled) setHistoryLoaded(true);
       }
 
-      // 2. Start a fresh session
       try {
         const sid = await getNewSession();
         if (cancelled) return;
         sessionIdRef.current = sid;
         setSessionId(sid);
         connectWebSocket(sid);
-      } catch (_) {
-        // Session creation failure — UI will show empty state, user can retry
+      } catch (err) {
+        console.error("Session creation error:", err);
       }
     }
 
     init();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [user, connectWebSocket]);
 
   // ── Send a message ─────────────────────────────────────────────────────────
@@ -233,7 +265,8 @@ export function useChat(user) {
             id:        makeId(),
             role:      "assistant",
             content:   data.reply,
-            // normalise so it's always treated as UTC
+            // normaliseTimestamp ensures the backend's tz-naive strings are
+            // always treated as UTC, consistent with buildMessages()
             timestamp: normaliseTimestamp(data.timestamp) || new Date().toISOString(),
             isError:   false,
           },
@@ -284,11 +317,14 @@ export function useChat(user) {
       setSessionId(sid);
       connectWebSocket(sid);
     } catch (_) {
-      // Failed to get a new session
+      // Session creation failed — leave sessionId/ref as-is so the user sees
+      // an empty chat rather than a fake local session that would silently drop
+      // every message on the backend. The UI can surface the error separately.
+      console.error("Failed to create new session");
     }
   }, [connectWebSocket]);
 
-  // ── Load existing conversation ─────────────────────────────────────────────
+  // ── Load conversation ──────────────────────────────────────────────────────
 
   const loadConversation = useCallback(
     (conv) => {
@@ -306,7 +342,7 @@ export function useChat(user) {
     [connectWebSocket]
   );
 
-  // ── Cleanup on unmount ─────────────────────────────────────────────────────
+  // ── Cleanup ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     return () => {

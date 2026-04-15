@@ -40,5 +40,3 @@ tests/fixtures/real_*.json
 tests/
 
 sample.py
-
-.openclaude-profile.json
