@@ -141,8 +141,32 @@ class GroqService(LLMBase):
                 message = choice.message 
 
                 # ── No tool calls → model is done ─────────────────────────
+                # No tool calls → model is done
                 if not message.tool_calls:
                     # Log final cumulative totals for this full request
+                    content = message.content or ""
+                    
+                    # Guard against degenerate model output (gibberish, repetition loops)
+                    # Heuristic: if >40% of words are ≤3 chars and total >20 words, it's garbage
+                    words = content.split()
+                    if len(words) > 20:
+                        short_word_ratio = sum(1 for w in words if len(w) <= 3) / len(words)
+                        if short_word_ratio > 0.6:
+                            logger.warning(
+                                f"[GROQ] Degenerate output detected "
+                                f"(short_word_ratio={short_word_ratio:.2f}) — retrying once"
+                            )
+                            # Retry once with slightly higher temperature to escape the loop
+                            retry = await self._client.chat.completions.create(
+                                model       = self._model,
+                                messages    = groq_messages,
+                                tools       = self._schemas,
+                                tool_choice = "none",
+                                temperature = min(settings.groq_temperature + 0.3, 1.0),
+                                max_tokens  = settings.groq_max_tokens,
+                            )
+                            content = retry.choices[0].message.content or ""
+
                     logger.info(
                         f"[TOKENS] ══ REQUEST COMPLETE ══ "
                         f"iterations: {iteration} | "
@@ -151,7 +175,7 @@ class GroqService(LLMBase):
                         f"TOTAL: {total_tokens_used}"
                     )
                     return AgentResponse(
-                        message      = message.content or "",
+                        message      = content,
                         tool_calls   = all_tool_calls,
                         tool_results = all_tool_results,
                     )

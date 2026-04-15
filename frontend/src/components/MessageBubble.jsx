@@ -3,8 +3,14 @@
 function formatTime(ts) {
   if (!ts) return "";
   try {
-    return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  } catch { return ""; }
+    return new Date(ts).toLocaleTimeString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  } catch {
+    return "";
+  }
 }
 
 function stripLeakedToolJson(text) {

@@ -5,9 +5,9 @@ const BASE_URL = "/api";
 // ── Token helpers ─────────────────────────────────────────────────────────────
 
 export const token = {
-  get:    ()      => localStorage.getItem("leafy_token"),
-  set:    (t)     => localStorage.setItem("leafy_token", t),
-  clear:  ()      => localStorage.removeItem("leafy_token"),
+  get:   ()  => localStorage.getItem("leafy_token"),
+  set:   (t) => localStorage.setItem("leafy_token", t),
+  clear: ()  => localStorage.removeItem("leafy_token"),
 };
 
 function authHeaders() {
@@ -58,10 +58,10 @@ export async function getNewSession() {
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
-// order_id is intentionally removed — the agent handles order disambiguation
-// through conversation. No need for the frontend to manage order context.
+// signal is an AbortSignal from AbortController — lets useChat.js cancel
+// an in-flight request when the user switches to a different chat.
 
-export async function sendMessage({ message, sessionId }) {
+export async function sendMessage({ message, sessionId, signal }) {
   return handleResponse(
     await fetch(`${BASE_URL}/chat`, {
       method:  "POST",
@@ -70,6 +70,7 @@ export async function sendMessage({ message, sessionId }) {
         message,
         session_id: sessionId,
       }),
+      signal, // ← this is the key addition; undefined is safe (browser ignores it)
     })
   );
 }
