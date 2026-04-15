@@ -1,6 +1,6 @@
 # backend/agent/schemas.py
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from pydantic import BaseModel, Field
@@ -35,7 +35,7 @@ class ToolResult(BaseModel):
 class AgentResponse(BaseModel):
     message:       str
     tool_calls:    list[ToolCall]  = []
-    tool_results:  list[ToolResult] = []   # ← NEW: parallel to tool_calls
+    tool_results:  list[ToolResult] = []
     was_escalated: bool = False
     error:         str | None = None
 
@@ -51,4 +51,13 @@ class ChatResponse(BaseModel):
     reply:         str
     session_id:    str
     was_escalated: bool = False
-    timestamp:     datetime = Field(default_factory=datetime.utcnow)
+    # ── FIX: use timezone-aware UTC datetime ──────────────────────────────────
+    # datetime.utcnow() produces a *naive* datetime with no tzinfo.
+    # FastAPI serialises it as "2026-04-13T12:33:21" (no Z / +00:00).
+    # JavaScript's Date constructor then interprets that as *local* time on
+    # many runtimes, shifting the displayed time by the UTC offset.
+    # datetime.now(timezone.utc) produces an *aware* datetime, serialised as
+    # "2026-04-13T12:33:21+00:00", which JS always parses as UTC.
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )

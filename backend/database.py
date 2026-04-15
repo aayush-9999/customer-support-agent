@@ -22,6 +22,12 @@ async def connect_db() -> None:
         serverSelectionTimeoutMS=settings.mongo_connect_timeout_ms,
         tls=True,
         tlsAllowInvalidCertificates=True,
+        # ── FIX: return timezone-aware UTC datetimes ──────────────────────────
+        # Without this, Motor returns naive datetime objects (tzinfo=None),
+        # which serialize without a 'Z' / '+00:00' suffix. JS then treats
+        # the string as *local* time instead of UTC, causing timestamps to
+        # shift by the user's UTC offset on every page refresh.
+        tz_aware=True,
     )
     await _client.admin.command("ping")
     logger.info(f"MongoDB connected — db: {settings.mongo_db_name}")

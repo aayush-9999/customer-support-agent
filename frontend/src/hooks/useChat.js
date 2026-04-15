@@ -31,11 +31,30 @@ function buildMessages(rawMsgs = []) {
       id:             makeId(),
       role:           m.role,
       content:        m.content,
-      timestamp:      m.timestamp || new Date().toISOString(),
+      // ── FIX: normalise timestamp to always be a UTC-flagged ISO string ────
+      // MongoDB returns datetimes without a Z suffix when tz_aware is not set.
+      // Now that we fixed the backend (tz_aware=True), timestamps will arrive as
+      // "2026-04-13T12:33:21+00:00". But we add the fallback for safety: if the
+      // string has no offset info, we append Z so JS always treats it as UTC.
+      timestamp:      normaliseTimestamp(m.timestamp),
       isNotification: m.role === "notification",
       status:         m.status || null,
       isError:        false,
     }));
+}
+
+/**
+ * Ensure an ISO timestamp string is always parsed as UTC by JS.
+ * If the string already has +HH:MM or Z — leave it alone.
+ * If it's a bare "YYYY-MM-DDTHH:mm:ss[.ffffff]" — append Z.
+ */
+function normaliseTimestamp(ts) {
+  if (!ts) return new Date().toISOString();
+  if (typeof ts !== "string") return new Date(ts).toISOString();
+  // Already has tz info?
+  if (ts.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(ts)) return ts;
+  // Bare UTC string from old backend — stamp it as UTC
+  return ts + "Z";
 }
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
@@ -49,29 +68,41 @@ export function useChat(user) {
 
   /**
    * sessionIdRef is the authoritative "which session owns the in-flight request"
-   * tracker. We update it synchronously whenever sessionId changes so that any
-   * async callback can check if it is still "current" before touching state.
-   *
-   * The React state (sessionId) is for rendering; the ref is for closures.
+   * guard. We use a ref (not state) because closures in async callbacks need to
+   * see the latest value synchronously — state updates are batched and async.
    */
   const sessionIdRef       = useRef(null);
-  const abortControllerRef = useRef(null); // AbortController for current fetch
-  const wsRef              = useRef(null); // active WebSocket
-
-  // Keep ref in sync with state — runs synchronously after every sessionId change
-  useEffect(() => {
-    sessionIdRef.current = sessionId;
-  }, [sessionId]);
+  const wsRef              = useRef(null);
+  const reconnectTimerRef  = useRef(null);   // for WS auto-reconnect
+  const abortControllerRef = useRef(null);
 
   // ── WebSocket ─────────────────────────────────────────────────────────────
 
+  /**
+   * connectWebSocket(sid)
+   *
+   * Opens a fresh WS connection for the given session, closing any previous one.
+   * Auto-reconnects after 3 s on unexpected close so the customer never misses
+   * an admin approval/rejection notification mid-session.
+   *
+   * Guard: if the user switches session while a reconnect is pending, we cancel
+   * the timer before opening the new connection, so we never resurrect a stale
+   * socket for the old session.
+   */
   const connectWebSocket = useCallback((sid) => {
-    // Close any existing socket first
+    // ── Cancel any pending reconnect timer for the previous session ──────────
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
+    // ── Close the previous WS without triggering its reconnect logic ─────────
+    // We null out onclose first so the old socket's "reconnect" path doesn't fire.
     if (wsRef.current) {
+      wsRef.current.onclose = null;
       wsRef.current.close();
       wsRef.current = null;
     }
-    if (!sid) return;
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host     = window.location.host;
@@ -83,8 +114,7 @@ export function useChat(user) {
         if (data.type !== "request_resolved") return;
 
         // ── GUARD: only inject notification into the session that owns this WS ──
-        // If the user has already switched to a different chat, the sid in the
-        // closure is stale — do not update the currently visible messages.
+        // If the user has already switched to a different chat, sid is stale.
         if (sessionIdRef.current !== sid) return;
 
         setMessages((prev) => [
@@ -104,10 +134,31 @@ export function useChat(user) {
       }
     };
 
-    ws.onerror = () => {};  // suppress console noise; reconnect not needed for support chat
-    ws.onclose = () => {};
+    ws.onerror = () => {
+      // Let onclose handle reconnect; onerror fires before onclose on most browsers
+      ws.close();
+    };
+
+    ws.onclose = () => {
+      // Only reconnect if this socket is still the active one for this session.
+      // If wsRef.current was already replaced (intentional switch), bail out.
+      if (wsRef.current !== ws) return;
+
+      // Only reconnect if we're still in the same session.
+      if (sessionIdRef.current !== sid) return;
+
+      // Reconnect after 3 s — same pattern as the admin CRM
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        // Re-check session hasn't changed during the delay
+        if (sessionIdRef.current === sid) {
+          connectWebSocket(sid);
+        }
+      }, 3000);
+    };
+
     wsRef.current = ws;
-  }, []); // stable — no external deps
+  }, []); // stable — no external deps; reconnect via closure over sid
 
   // ── Init: bootstrap session + load history ────────────────────────────────
 
@@ -132,7 +183,6 @@ export function useChat(user) {
       try {
         const sid = await getNewSession();
         if (cancelled) return;
-        // Update both state and ref atomically-ish (ref first so callbacks see it)
         sessionIdRef.current = sid;
         setSessionId(sid);
         connectWebSocket(sid);
@@ -149,17 +199,15 @@ export function useChat(user) {
 
   const send = useCallback(
     async (text) => {
-      const sendingSessionId = sessionIdRef.current; // capture NOW, before any await
+      const sendingSessionId = sessionIdRef.current;
       if (!sendingSessionId || !text.trim()) return;
 
-      // Abort any previous in-flight request (e.g. user sent while still loading)
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
-      // Optimistically show the user's message
       const userMsg = {
         id:        makeId(),
         role:      "user",
@@ -174,13 +222,9 @@ export function useChat(user) {
         const data = await apiSendMessage({
           message:   text.trim(),
           sessionId: sendingSessionId,
-          signal:    controller.signal, // allows us to abort on session switch
+          signal:    controller.signal,
         });
 
-        // ── RACE CONDITION GUARD ───────────────────────────────────────────
-        // If the user switched to a different chat while we were waiting,
-        // sessionIdRef.current is now a different session. Discard this response
-        // entirely — do NOT write it into the new chat's message list.
         if (sessionIdRef.current !== sendingSessionId) return;
 
         setMessages((prev) => [
@@ -189,21 +233,19 @@ export function useChat(user) {
             id:        makeId(),
             role:      "assistant",
             content:   data.reply,
-            timestamp: data.timestamp || new Date().toISOString(),
+            // normalise so it's always treated as UTC
+            timestamp: normaliseTimestamp(data.timestamp) || new Date().toISOString(),
             isError:   false,
           },
         ]);
 
-        // Refresh sidebar history in the background — fire and forget
+        // Refresh sidebar history in the background
         getConversationHistory()
           .then((d) => setConversations(d.conversations || []))
           .catch(() => {});
 
       } catch (err) {
-        // AbortError means we intentionally cancelled — no UI update
         if (err.name === "AbortError") return;
-
-        // For any other error, only show it if still on the same session
         if (sessionIdRef.current !== sendingSessionId) return;
 
         setMessages((prev) => [
@@ -217,37 +259,32 @@ export function useChat(user) {
           },
         ]);
       } finally {
-        // Only clear the loading spinner if we're still on the same session.
-        // If the session changed, newChat/loadConversation already cleared it.
         if (sessionIdRef.current === sendingSessionId) {
           setLoading(false);
         }
       }
     },
-    [] // no deps — uses refs for session, so always stable
+    []
   );
 
   // ── New chat ───────────────────────────────────────────────────────────────
 
   const newChat = useCallback(async () => {
-    // Kill any in-flight request for the old session immediately.
-    // This prevents the response from arriving later and contaminating state.
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
 
-    // Reset UI state first so the user sees a clean chat immediately
     setMessages([]);
     setLoading(false);
 
     try {
       const sid = await getNewSession();
-      sessionIdRef.current = sid; // update ref before state so guards see it first
+      sessionIdRef.current = sid;
       setSessionId(sid);
       connectWebSocket(sid);
     } catch (_) {
-      // Failed to get a new session — leave on empty state, user can try again
+      // Failed to get a new session
     }
   }, [connectWebSocket]);
 
@@ -255,13 +292,11 @@ export function useChat(user) {
 
   const loadConversation = useCallback(
     (conv) => {
-      // Kill the in-flight request for the old session immediately
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
       }
 
-      // Update ref BEFORE state so any concurrent callback sees the new session
       sessionIdRef.current = conv.session_id;
       setSessionId(conv.session_id);
       setLoading(false);
@@ -275,8 +310,12 @@ export function useChat(user) {
 
   useEffect(() => {
     return () => {
+      if (reconnectTimerRef.current)  clearTimeout(reconnectTimerRef.current);
       if (abortControllerRef.current) abortControllerRef.current.abort();
-      if (wsRef.current)              wsRef.current.close();
+      if (wsRef.current) {
+        wsRef.current.onclose = null; // prevent reconnect loop on unmount
+        wsRef.current.close();
+      }
     };
   }, []);
 

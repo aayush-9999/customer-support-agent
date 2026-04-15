@@ -1,10 +1,11 @@
 // frontend/src/App.jsx
 
-import { useAuth }                 from "./hooks/useAuth";
-import { useChat }                 from "./hooks/useChat";
-import { AuthPage }                from "./components/AuthPage";
-import { ChatWindow }              from "./components/ChatWindow";
-import { ConversationSidebar }     from "./components/ConversationSidebar";
+import { useState, useEffect }         from "react";
+import { useAuth }                      from "./hooks/useAuth";
+import { useChat }                      from "./hooks/useChat";
+import { AuthPage }                     from "./components/AuthPage";
+import { ChatWindow }                   from "./components/ChatWindow";
+import { ConversationSidebar }          from "./components/ConversationSidebar";
 import "./app.css";
 
 export default function App() {
@@ -14,6 +15,23 @@ export default function App() {
     conversations, historyLoaded,
     send, newChat, loadConversation,
   } = useChat(user);
+
+  // ── Theme ─────────────────────────────────────────────────────────────────
+  // Initialise from localStorage so preference survives refresh.
+  const [theme, setTheme] = useState(
+    () => localStorage.getItem("leafy_theme") || "light"
+  );
+
+  // Apply theme to <html> element so CSS [data-theme="dark"] selectors work.
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("leafy_theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme((t) => (t === "light" ? "dark" : "light"));
+
+  // ── Sidebar collapse ──────────────────────────────────────────────────────
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const handleLogout = async () => {
     await logout(sessionId);
@@ -41,6 +59,10 @@ export default function App() {
         onNewChat={newChat}
         onLogout={handleLogout}
         activeSessionId={sessionId}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
       <main className="shell__main">
         <ChatWindow
@@ -49,6 +71,8 @@ export default function App() {
           loading={chatLoading}
           onSend={send}
           sessionId={sessionId}
+          theme={theme}
+          onToggleTheme={toggleTheme}
         />
       </main>
     </div>

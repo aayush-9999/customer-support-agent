@@ -11,22 +11,42 @@ const SUGGESTIONS = [
   "Check my account details",
 ];
 
-export function ChatWindow({ user, messages, loading, onSend, sessionId }) {
+function SunIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="12" cy="12" r="5"/>
+      <line x1="12" y1="1" x2="12" y2="3"/>
+      <line x1="12" y1="21" x2="12" y2="23"/>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+      <line x1="1" y1="12" x2="3" y2="12"/>
+      <line x1="21" y1="12" x2="23" y2="12"/>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+    </svg>
+  );
+}
+
+export function ChatWindow({ user, messages, loading, onSend, sessionId, theme, onToggleTheme }) {
   const [input, setInput] = useState("");
   const bottomRef         = useRef(null);
   const inputRef          = useRef(null);
   const messagesRef       = useRef(null);
 
-  // ── Auto-scroll to bottom on new messages / loading state ─────────────────
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  // ── Re-focus input and scroll to bottom whenever session changes ───────────
-  // This fixes the UX problem where switching chats leaves focus in a void.
   useEffect(() => {
     if (!sessionId) return;
-    // Small timeout lets React finish painting the new messages before we scroll
     const t = setTimeout(() => {
       inputRef.current?.focus();
       bottomRef.current?.scrollIntoView({ behavior: "instant" });
@@ -34,11 +54,9 @@ export function ChatWindow({ user, messages, loading, onSend, sessionId }) {
     return () => clearTimeout(t);
   }, [sessionId]);
 
-  // ── Auto-grow textarea height ──────────────────────────────────────────────
   const handleInputChange = (e) => {
     const el = e.target;
     setInput(el.value);
-    // Reset then grow to fit content
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 120) + "px";
   };
@@ -47,7 +65,6 @@ export function ChatWindow({ user, messages, loading, onSend, sessionId }) {
     const text = input.trim();
     if (!text || loading) return;
     setInput("");
-    // Reset textarea height after clearing
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
@@ -86,6 +103,15 @@ export function ChatWindow({ user, messages, loading, onSend, sessionId }) {
             <p className="chat-header__status">Online &middot; replies instantly</p>
           </div>
         </div>
+
+        {/* Theme toggle in header */}
+        <button
+          className="chat-header__theme-btn"
+          onClick={onToggleTheme}
+          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        >
+          {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+        </button>
       </div>
 
       {/* ── Messages ── */}

@@ -470,7 +470,7 @@ class ChangeDeliveryDate(BaseTool):
 
         try:
             req_dt = datetime.strptime(requested_date, "%Y-%m-%d").replace(
-                tzinfo=ZoneInfo("Asia/Kolkata")
+                tzinfo=timezone.utc
             )
         except ValueError:
             return self.error(
@@ -516,7 +516,7 @@ class ChangeDeliveryDate(BaseTool):
                 )
 
             if isinstance(warehouse_dt, datetime) and warehouse_dt.tzinfo is None:
-                warehouse_dt = warehouse_dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+                warehouse_dt = warehouse_dt.replace(timezone.utc)
 
             if req_dt < warehouse_dt:
                 return self.success({
@@ -1225,7 +1225,7 @@ class InitiateReturn(BaseTool):
             )
  
         if isinstance(delivery_date, datetime) and delivery_date.tzinfo is None:
-            delivery_date = delivery_date.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+            delivery_date = delivery_date.replace(timezone.utc)
  
         now = datetime.now(timezone.utc)
         days_since_delivery = (now - delivery_date).days
